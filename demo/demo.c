@@ -148,8 +148,14 @@ focus_moved (GtkWindow *win, GParamSpec *spec, gpointer data)
   if (w == NULL)
     g_print ("focus none\n");
   else if (g_strcmp0 (gtk_widget_get_css_name (w), "tab") == 0)
-    g_print ("focus tab %s\n",
-             gtk_label_get_text (GTK_LABEL (gtk_widget_get_first_child (w))));
+    {
+      GtkWidget *label = gtk_widget_get_first_child (w);
+
+      while (label != NULL && !GTK_IS_LABEL (label))
+        label = gtk_widget_get_next_sibling (label);
+
+      g_print ("focus tab %s\n", label != NULL ? gtk_label_get_text (GTK_LABEL (label)) : "");
+    }
   else
     g_print ("focus %s\n", G_OBJECT_TYPE_NAME (w));
 }
@@ -195,6 +201,23 @@ destroy_console (GSimpleAction *action, GVariant *param, gpointer panes)
     gtk_window_destroy (win);
 }
 
+/* The tabs from a strip into the corner and back, as an app's View menu
+   might: Ctrl T. */
+static void
+toggle_header (GSimpleAction *action, GVariant *param, gpointer panes)
+{
+  mln_panes_set_header (panes, mln_panes_get_header (panes) == MLN_HEADER_CORNER
+                               ? MLN_HEADER_STRIP : MLN_HEADER_CORNER);
+  g_print ("header %s\n",
+           mln_panes_get_header (panes) == MLN_HEADER_CORNER ? "corner" : "strip");
+}
+
+static void
+corner_changed (MlnPanes *panes, gpointer data)
+{
+  g_print ("corner editor %d\n", mln_panes_get_corner_width (panes, "editor"));
+}
+
 static void
 clear_console (GSimpleAction *action, GVariant *param, gpointer data)
 {
@@ -225,6 +248,29 @@ activate (GtkApplication *app)
   mln_panes_register (MLN_PANES (panes), "inspector", "Inspector",
                       text ("width  240\nheight  64\n"), 160);
   mln_panes_register (MLN_PANES (panes), "drawing", "Drawing", drawing, 120);
+
+  /* Icons for the tabs, which the corner shows in place of the titles:
+     every pane but the inspector, which shows its title there. */
+  {
+    const char *icons[][2] = {
+      { "editor", "text-x-generic-symbolic" },
+      { "console", "utilities-terminal-symbolic" },
+      { "drawing", "applications-graphics-symbolic" },
+    };
+
+    for (guint i = 0; i < G_N_ELEMENTS (icons); i++)
+      {
+        GIcon *icon = g_themed_icon_new (icons[i][1]);
+
+        mln_panes_set_icon (MLN_PANES (panes), icons[i][0], icon);
+        g_object_unref (icon);
+      }
+  }
+
+  if (g_getenv ("MLN_DEMO_CORNER") != NULL)
+    mln_panes_set_header (MLN_PANES (panes), MLN_HEADER_CORNER);
+
+  g_signal_connect (panes, "corner-changed", G_CALLBACK (corner_changed), NULL);
 
   /* A pane the layout above does not have, opened in the side slot
      wherever a layout does not have it: what a pane new in a release
@@ -259,6 +305,16 @@ activate (GtkApplication *app)
 
   if (g_getenv ("MLN_DEMO_HEADERBAR") != NULL)
     mln_panes_set_window_func (MLN_PANES (panes), make_window, app, NULL);
+
+  {
+    GSimpleAction *t = g_simple_action_new ("header", NULL);
+
+    g_signal_connect (t, "activate", G_CALLBACK (toggle_header), panes);
+    g_action_map_add_action (G_ACTION_MAP (app), G_ACTION (t));
+    gtk_application_set_accels_for_action (app, "app.header",
+                                           (const char *[]) { "<Control>t", NULL });
+    g_object_unref (t);
+  }
 
   {
     GSimpleAction *d = g_simple_action_new ("destroy-console", NULL);

@@ -52,6 +52,20 @@ typedef enum
   MLN_PANE_QUIET     = 1 << 1,  /* added behind what is in front */
 } MlnPaneFlags;
 
+/* Where a leaf's tabs are: a strip across its top, or tucked into its
+   top corner over the pane, in sight while the pointer or the focus is in
+   the leaf -- the panes' icons (the title for one without), a grip for a
+   pane alone, the front pane's cross and a menu button. */
+typedef enum
+{
+  MLN_HEADER_STRIP,
+  MLN_HEADER_CORNER,
+} MlnHeader;
+
+#define MLN_TYPE_HEADER (mln_header_get_type ())
+
+MLN_EXPORT GType mln_header_get_type (void);
+
 /* A floating window for panes undocked from `panes', made by the app so
    that it can give it an application, a title, its keys. NULL: one is
    made, transient for the window `panes' is in and of its application. */
@@ -86,6 +100,20 @@ MLN_EXPORT void        mln_panes_set_title     (MlnPanes *self, const char *id,
                                      const char *title);
 MLN_EXPORT void        mln_panes_set_available (MlnPanes *self, const char *id,
                                      gboolean available);
+
+/* A picture of it for its tab: beside the title in a strip, in place of
+   it in the corner. NULL for none. */
+MLN_EXPORT void        mln_panes_set_icon      (MlnPanes *self, const char *id,
+                                     GIcon *icon);
+
+/* The "header" property (see MlnHeader). */
+MLN_EXPORT void        mln_panes_set_header    (MlnPanes *self, MlnHeader header);
+MLN_EXPORT MlnHeader   mln_panes_get_header    (MlnPanes *self);
+
+/* How much of the top of a pane, at the end of the line, the corner's
+   controls cover: for a pane whose first row makes room for them. 0 with
+   the tabs in a strip. ::corner-changed says when it may have changed. */
+MLN_EXPORT int         mln_panes_get_corner_width (MlnPanes *self, const char *id);
 
 /* A pane that wants to be looked at, until it is: its tab is marked,
    and the mark goes when the pane comes into view. */
@@ -168,12 +196,13 @@ MLN_EXPORT void        mln_panes_reset         (MlnPanes *self);
 
 /* Properties: "split" (divider thickness, px), "leaf-min-height" (px),
    "edge" (the part of a leaf's box that splits it, 0..0.5),
-   "show-drawer".
+   "show-drawer", "header" (MlnHeader).
 
    Signals:
      pane-shown (id, visible)       a pane came into or went out of view
      layout-changed (mode)          by a person or the app
      layout-kept (mode, text)       keep this for the mode; NULL: forget it
-     pane-discard (id)              a person closed an ephemeral pane */
+     pane-discard (id)              a person closed an ephemeral pane
+     corner-changed ()              the corner's width changed over a leaf */
 
 G_END_DECLS

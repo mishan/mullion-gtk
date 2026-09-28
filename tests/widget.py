@@ -481,6 +481,71 @@ def floats_kept(d):
     check("inspector" in d.shown(), "with its pane in view")
 
 
+def corner(d):
+    g = d.geometry()
+    ex, ey, ew, eh = g["editor"]["tab"]
+    lx, ly, lw, lh = g["editor"]["leaf"]
+    # Its icon and, in front, its cross: no title.
+    check(ey < ly + 10 and ex > lx + lw / 2 and ew < 90,
+          f"in the corner, a tab is its icon, over the leaf's top end: {g['editor']}")
+    widths = [int(w) for w in d.lines("corner editor ")]
+    check(widths and widths[-1] > ew,
+          f"and the leaf's corner is at least that wide: {widths}")
+
+    d.click(*d.centre("drawing"))
+    check(tabs(d.kept())[0] == (["editor", "drawing"], 1),
+          f"an icon clicked raises its pane: {tabs(d.kept())}")
+
+    # The inspector alone in its leaf: its tab is a grip, dragged onto the
+    # other leaf's icons, before the first.
+    # On the grip, at the tab's start: its middle may be its cross.
+    x, y, w, h = d.geometry()["inspector"]["tab"]
+    ix, iy = x + 9, y + h / 2
+
+    def before_editor(g):
+        x, y, w, h = g["editor"]["tab"]
+        return x + 3, y + h / 2
+
+    d.drag(ix, iy, before_editor)
+    check(tabs(d.kept())[0] == (["inspector", "editor", "drawing"], 0),
+          f"a grip dropped on a corner's icons goes before the one under it: {tabs(d.kept())}")
+
+    d.key("ctrl+t")                     # the demo's header toggle
+    g = d.geometry()
+    ex, ey, ew, eh = g["editor"]["tab"]
+    lx, ly, lw, lh = g["editor"]["leaf"]
+    check(d.lines("header ") == ["strip"] and ey == ly and ex < lx + lw / 2,
+          f"and back in a strip, the tabs are across the top: {g['editor']}")
+    check(d.lines("corner editor ")[-1] == "0", "with no corner to leave room for")
+
+
+def corner_after_a_window(d):
+    # Out into a window by the tab menu, and back by its window's: its host
+    # comes back into the main one, and must not come back over the corner.
+    x, y = d.centre("console")
+    d.s.click(int(x), int(y), window=W, button=3)
+    time.sleep(0.5)
+    d.key("n")                          # Move to _New Window
+    d.s.wait_window("Console")
+    d.settle()
+    x, y = d.centre("console")
+    d.s.click(int(x), int(y), window="Console", button=3)
+    time.sleep(0.5)
+    d.s.key("m")                        # Move to _Main Window
+    d.settle()
+    check("window" not in d.geometry()["console"], "back in the main window")
+
+    x, y, w, h = d.geometry()["console"]["tab"]
+
+    def before_editor(g):
+        x, y, w, h = g["editor"]["tab"]
+        return x + 3, y + h / 2
+
+    d.drag(x + 9, y + h / 2, before_editor)
+    check(tabs(d.kept())[0] == (["console", "editor", "drawing"], 0),
+          f"and its corner still over its pane, to drag it by: {tabs(d.kept())}")
+
+
 def right_to_left(d):
     ex, ey, ew, eh = d.geometry()["editor"]["leaf"]
     ix = d.geometry()["inspector"]["leaf"][0]
@@ -523,6 +588,12 @@ scenario(floats_kept, env={"MLN_DEMO_LAYOUT": json.dumps({
     "layout": {"dir": "col", "size": [0.7, 0.3], "kids": [
         {"tabs": ["editor", "drawing"]}, {"tabs": ["console"]}]},
     "floating": [{"layout": {"tabs": ["inspector"]}, "size": [300, 200]}]})})
+
+print("# corner")
+scenario(corner, env={"MLN_DEMO_CORNER": "1"})
+
+print("# corner_after_a_window")
+scenario(corner_after_a_window, env={"MLN_DEMO_CORNER": "1"})
 
 print("# placed")
 scenario(placed, env={"MLN_DEMO_PLACEMENT": "1"})

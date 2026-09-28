@@ -218,6 +218,27 @@ static const char *STYLE =
   "  border: none;"
   "}"
   "panes > .panedrawer > button.paneclosed { padding: 1px 8px; min-height: 22px; }"
+  "panes > tabs.corner {"
+  "  background-color: @theme_bg_color;"
+  "  border: 1px solid alpha(@borders, 0.8);"
+  "  border-radius: 5px;"
+  "  padding: 1px;"
+  "  box-shadow: 0 1px 3px alpha(black, 0.15);"
+  "  opacity: 0;"
+  "  transition: opacity 120ms;"
+  "}"
+  "panes > tabs.corner.shown, panes.panedrag > tabs.corner { opacity: 1; }"
+  "panes > tabs.corner > tab {"
+  "  padding: 3px 5px;"
+  "  border-bottom: none;"
+  "  border-radius: 3px;"
+  "}"
+  "panes > tabs.corner > tab.front {"
+  "  background-color: alpha(@theme_selected_bg_color, 0.2);"
+  "}"
+  "panes > tabs.corner > tab.grip { background-color: transparent; }"
+  "panes > tabs.corner > tab > button.shut { margin-left: 2px; }"
+  "panes > tabs.corner > button.panemenu { min-width: 20px; min-height: 20px; padding: 0 2px; }"
   "label.panedragicon {"
   "  padding: 4px 10px;"
   "  background-color: @theme_bg_color;"
@@ -269,7 +290,10 @@ typedef struct
   GtkWidget *host;
   GtkWidget *tab;               /* its tab, in whichever strip holds it */
   GtkWidget *label;
+  GtkWidget *image;             /* its icon, when it has one */
+  GtkWidget *grip;              /* what its tab shows alone in the corner */
   GtkWidget *shut;              /* the cross on the tab */
+  GIcon *icon;
   gboolean shown;               /* what pane-shown last said */
   GMenuModel *menu;             /* the app's items for its tab menu */
 } Pane;
@@ -284,6 +308,9 @@ typedef struct
   GtkWidget *strip;
   Box box;                      /* the whole leaf, strip and pane */
   int strip_h;
+  Box tabs;                     /* the strip itself, where it was put */
+  GtkWidget *more;              /* the corner's menu button */
+  int corner_w;                 /* how wide it was put, in the corner */
 } Strip;
 
 /* Where a dragged tab would land if it were let go (mullion's `under'). */
@@ -369,6 +396,15 @@ struct _MlnPanes
   int pad_w, pad_h;
   gboolean padded;
 
+  /* Where the tabs are: the main one's say, which its floating windows
+     draw by. The leaf the pointer is over, for the corner to show in;
+     and the window whose focus is watched, for the same. */
+  MlnHeader header;
+  MlnNode *hover;
+  GtkWidget *watched;
+  gulong focus_handler;
+  guint corner_idle;
+
   /* The main one's floating windows, and how the app makes one. */
   GPtrArray *floats;            /* FloatWin* */
   MlnWindowFunc window_func;
@@ -387,6 +423,10 @@ typedef struct
 
 G_DEFINE_FINAL_TYPE (MlnPanes, mln_panes, GTK_TYPE_WIDGET)
 
+G_DEFINE_ENUM_TYPE (MlnHeader, mln_header,
+                    G_DEFINE_ENUM_VALUE (MLN_HEADER_STRIP, "strip"),
+                    G_DEFINE_ENUM_VALUE (MLN_HEADER_CORNER, "corner"))
+
 enum
 {
   PROP_0,
@@ -394,6 +434,7 @@ enum
   PROP_LEAF_MIN_HEIGHT,
   PROP_EDGE,
   PROP_SHOW_DRAWER,
+  PROP_HEADER,
   N_PROPS
 };
 
@@ -405,6 +446,7 @@ enum
   LAYOUT_CHANGED,
   LAYOUT_KEPT,
   PANE_DISCARD,
+  CORNER_CHANGED,
   N_SIGNALS
 };
 
@@ -418,6 +460,8 @@ static void on_tab_drag_end (GtkGestureDrag *g, double x, double y, gpointer dat
 static gboolean on_tab_key (GtkEventControllerKey *keys, guint keyval, guint code,
                             GdkModifierType state, gpointer data);
 static void open_menu (MlnPanes *self, const char *id, double x, double y);
+static Box bounds_in (MlnPanes *self, GtkWidget *w);
+static void corner_shown (MlnPanes *self);
 
 static Pane *
 pane_of (MlnPanes *self, const char *id)
@@ -613,10 +657,19 @@ make_tab (MlnPanes *self, Pane *p)
   GtkWidget *tab = g_object_new (MLN_TYPE_TAB, NULL);
   GtkGesture *click = gtk_gesture_click_new ();
 
+  p->image = gtk_image_new ();
+  gtk_widget_add_css_class (p->image, "paneicon");
+  gtk_widget_set_visible (p->image, FALSE);
+  gtk_widget_set_parent (p->image, tab);
+
   p->label = gtk_label_new (p->title);
   gtk_label_set_ellipsize (GTK_LABEL (p->label), PANGO_ELLIPSIZE_END);
   gtk_label_set_width_chars (GTK_LABEL (p->label), 3);
   gtk_widget_set_parent (p->label, tab);
+
+  p->grip = gtk_image_new_from_icon_name ("list-drag-handle-symbolic");
+  gtk_widget_set_visible (p->grip, FALSE);
+  gtk_widget_set_parent (p->grip, tab);
 
   p->shut = gtk_button_new_from_icon_name ("window-close-symbolic");
   gtk_widget_add_css_class (p->shut, "flat");
@@ -636,6 +689,9 @@ make_tab (MlnPanes *self, Pane *p)
 
   gtk_accessible_update_relation (GTK_ACCESSIBLE (tab),
                                   GTK_ACCESSIBLE_RELATION_CONTROLS, p->host, NULL, -1);
+  /* Named for itself, where the corner shows no title. */
+  gtk_accessible_update_property (GTK_ACCESSIBLE (tab),
+                                  GTK_ACCESSIBLE_PROPERTY_LABEL, p->title, -1);
   gtk_accessible_update_relation (GTK_ACCESSIBLE (p->host),
                                   GTK_ACCESSIBLE_RELATION_LABELLED_BY, p->label, NULL, -1);
 
@@ -696,12 +752,31 @@ strip_free (Strip *s)
   /* Its tabs are the panes', and are taken out before it goes. */
   GtkWidget *child;
 
+  if (s->more != NULL)
+    gtk_box_remove (GTK_BOX (s->strip), s->more);
+
   while ((child = gtk_widget_get_first_child (s->strip)) != NULL)
     gtk_box_remove (GTK_BOX (s->strip), child);
 
   gtk_widget_unparent (s->strip);
   mln_node_unref (s->leaf);
   g_free (s);
+}
+
+/* The corner's menu button: the menu of the pane in front, under it. */
+static void
+on_more (GtkButton *button, gpointer data)
+{
+  MlnPanes *self = data;
+  Strip *s = g_object_get_data (G_OBJECT (button), "mln-strip");
+  GPtrArray *live = mln_model_live_tabs (self->model, s->leaf);
+  guint active = mln_node_active (s->leaf);
+  Box b = bounds_in (self, GTK_WIDGET (button));
+
+  if (active < live->len)
+    open_menu (self, live->pdata[active], b.x + b.w / 2.0, b.y + b.h);
+
+  g_ptr_array_unref (live);
 }
 
 static Strip *
@@ -718,6 +793,22 @@ make_strip (MlnPanes *self, MlnNode *leaf)
   gtk_accessible_update_property (GTK_ACCESSIBLE (s->strip),
                                   GTK_ACCESSIBLE_PROPERTY_LABEL, "Panes", -1);
   gtk_widget_set_parent (s->strip, GTK_WIDGET (self));
+
+  /* The corner's way to the tab menu, which in a strip is a right click
+     on the tab: the corner is small enough to be missed as a place to
+     right-click. The front pane's menu, and after the tabs. */
+  s->more = gtk_button_new_from_icon_name ("open-menu-symbolic");
+  gtk_widget_add_css_class (s->more, "flat");
+  gtk_widget_add_css_class (s->more, "panemenu");
+  gtk_widget_set_focus_on_click (s->more, FALSE);
+  gtk_widget_set_tooltip_text (s->more, "Pane menu");
+  gtk_accessible_update_property (GTK_ACCESSIBLE (s->more),
+                                  GTK_ACCESSIBLE_PROPERTY_LABEL, "Pane menu", -1);
+  g_object_set_data (G_OBJECT (s->more), "mln-strip", s);
+  g_signal_connect (s->more, "clicked", G_CALLBACK (on_more), self);
+  gtk_widget_set_visible (s->more, FALSE);
+  gtk_box_append (GTK_BOX (s->strip), s->more);
+
   g_ptr_array_add (self->strips, s);
 
   return s;
@@ -1046,15 +1137,26 @@ sync_node (MlnPanes *self, MlnNode *node, GHashTable *drawn, GHashTable *front)
       GtkWidget *prev = NULL;
       guint active = mln_node_active (node);
 
+      gboolean corner = main_of (self)->header == MLN_HEADER_CORNER;
+
       if (s == NULL)
         s = make_strip (self, node);
 
       g_hash_table_add (drawn, s);
 
+      if (corner)
+        gtk_widget_add_css_class (s->strip, "corner");
+      else
+        gtk_widget_remove_css_class (s->strip, "corner");
+
+      gtk_widget_set_visible (s->more, corner);
+
       for (guint i = 0; i < live->len; i++)
         {
           Pane *p = pane_of (self, live->pdata[i]);
           gboolean on = i == active;
+
+          gboolean alone = corner && live->len == 1;
 
           if (gtk_widget_get_parent (p->tab) != s->strip)
             {
@@ -1068,6 +1170,25 @@ sync_node (MlnPanes *self, MlnNode *node, GHashTable *drawn, GHashTable *front)
 
           prev = p->tab;
 
+          /* What the tab shows: in a strip, the title, after the icon if
+             there is one. In the corner, the icon alone -- the title for a
+             pane without one -- and the title as a tooltip; and a grip
+             for a pane alone in its leaf, where there is nothing to
+             switch to, but still a tab to drag it by and land the keys
+             on. */
+          gtk_widget_set_visible (p->image, p->icon != NULL && !alone);
+          /* Toward the title, whichever way the line runs. */
+          gtk_widget_set_margin_end (p->image, corner ? 0 : 6);
+          gtk_widget_set_visible (p->label, !corner || (!alone && p->icon == NULL));
+          gtk_widget_set_visible (p->grip, alone);
+
+          if (alone)
+            gtk_widget_add_css_class (p->tab, "grip");
+          else
+            gtk_widget_remove_css_class (p->tab, "grip");
+          gtk_widget_set_tooltip_text (p->tab, !corner ? NULL
+                                               : alone ? NULL : p->title);
+
           gtk_accessible_update_state (GTK_ACCESSIBLE (p->tab),
                                        GTK_ACCESSIBLE_STATE_SELECTED, on, -1);
 
@@ -1080,12 +1201,15 @@ sync_node (MlnPanes *self, MlnNode *node, GHashTable *drawn, GHashTable *front)
           gtk_widget_set_focusable (p->tab, on);
           gtk_widget_set_focusable (p->shut, on);
 
-          gtk_widget_set_visible (p->shut, mln_model_closable (self->model, p->id));
+          /* In the corner, one cross: the front pane's. */
+          gtk_widget_set_visible (p->shut, mln_model_closable (self->model, p->id) &&
+                                           (!corner || on));
 
           if (on && is_visible_leaf (self, node))
             g_hash_table_add (front, p);
         }
 
+      gtk_box_reorder_child_after (GTK_BOX (s->strip), s->more, prev);
       g_ptr_array_unref (live);
       return;
     }
@@ -1152,6 +1276,7 @@ sync_one (MlnPanes *self, GHashTable *front)
   for (guint i = 0; i < self->dividers->len; i++)
     gtk_widget_set_child_visible (((Divider *) self->dividers->pdata[i])->bar, zoom == NULL);
 
+
   if (self->owner == NULL)
     {
       GArray *ids = mln_model_floats (self->model);
@@ -1169,6 +1294,39 @@ sync_one (MlnPanes *self, GHashTable *front)
 
   g_hash_table_unref (drawn);
   gtk_widget_queue_resize (GTK_WIDGET (self));
+}
+
+/* The corner is drawn over the panes, so after every host -- and under
+   the drop hint, which is last. Moved only where something is out of
+   place: a move restyles what moved. After the hosts have gone where they
+   are drawn, which appends one that came from another window. */
+static void
+corner_on_top (MlnPanes *self)
+{
+  gboolean seen_strip = FALSE, out_of_place = FALSE;
+
+  if (main_of (self)->header != MLN_HEADER_CORNER)
+    return;
+
+  for (GtkWidget *w = gtk_widget_get_first_child (GTK_WIDGET (self));
+       w != NULL && !out_of_place; w = gtk_widget_get_next_sibling (w))
+    {
+      gboolean strip = g_strcmp0 (gtk_widget_get_css_name (w), "tabs") == 0;
+
+      if (strip)
+        seen_strip = TRUE;
+      else if (seen_strip && w != self->hint && !GTK_IS_POPOVER (w))
+        out_of_place = TRUE;
+    }
+
+  if (!out_of_place)
+    return;
+
+  for (guint i = 0; i < self->strips->len; i++)
+    gtk_widget_insert_before (((Strip *) self->strips->pdata[i])->strip,
+                              GTK_WIDGET (self), NULL);
+
+  gtk_widget_insert_before (self->hint, GTK_WIDGET (self), NULL);
 }
 
 static void float_open (MlnPanes *self, guint id);
@@ -1294,6 +1452,22 @@ sync_children (MlnPanes *self)
       }
 
     g_hash_table_unref (front);
+
+    /* The corners over what is now where it is drawn, and in sight where
+       a mark in them asks to be. */
+    corner_on_top (self);
+    corner_shown (self);
+
+    for (guint k = 0; k < self->floats->len; k++)
+      {
+        FloatWin *fw = self->floats->pdata[k];
+
+        if (fw->win != NULL)
+          {
+            corner_on_top (fw->panes);
+            corner_shown (fw->panes);
+          }
+      }
 
     g_object_ref (self);
 
@@ -1605,11 +1779,13 @@ under (MlnPanes *self, double x, double y, Drop *d)
   box = s->box;
 
   /* Over the strip, which is a row of places: before the first tab whose
-     middle is past the pointer. The tab being dragged is not a place. */
-  if (y < box.y + s->strip_h)
+     middle is past the pointer. The tab being dragged is not a place. In
+     the corner, the strip is where it was put, over the pane. */
+  if (main_of (self)->header == MLN_HEADER_CORNER ? inside (s->tabs, x, y)
+                                                  : y < box.y + s->strip_h)
     {
       GtkWidget *last = NULL;
-      int at = rtl (self) ? box.x + box.w : box.x;
+      int at = rtl (self) ? s->tabs.x + s->tabs.w : s->tabs.x;
 
       d->kind = DROP_TAB;
 
@@ -1640,7 +1816,7 @@ under (MlnPanes *self, double x, double y, Drop *d)
           at = rtl (self) ? lb.x : lb.x + lb.w;
         }
 
-      d->hint = (Box) { at - 1, box.y, 3, s->strip_h };
+      d->hint = (Box) { at - 1, s->tabs.y, 3, s->tabs.h };
       return;
     }
 
@@ -2547,6 +2723,7 @@ menu_closed (GtkPopover *popover, gpointer data)
   MlnPanes *self = data;
 
   g_clear_pointer (&self->menu_id, g_free);
+  corner_shown (self);
 }
 
 static void
@@ -2634,6 +2811,98 @@ open_menu (MlnPanes *self, const char *id, double x, double y)
   g_object_unref (end);
 }
 
+/* ---- the corner ---- */
+
+/* Which corners are in sight: the one over the leaf the pointer is in,
+   the one over the leaf the focus is in, and -- through the "panedrag"
+   class, in the stylesheet -- every one while a tab is being dragged. */
+static void
+corner_shown (MlnPanes *self)
+{
+  MlnNode *focused;
+
+  if (self->strips == NULL || self->model == NULL)
+    return;
+
+  focused = focused_leaf (self);
+
+  for (guint i = 0; i < self->strips->len; i++)
+    {
+      Strip *s = self->strips->pdata[i];
+      gboolean marked = FALSE;
+      gboolean menu = self->menu_id != NULL &&
+                      mln_model_leaf_with (self->model, self->menu_id) == s->leaf;
+
+      /* A tab marked for attention is a mark nobody would see in a
+         corner out of sight. */
+      for (GtkWidget *t = gtk_widget_get_first_child (s->strip); t != NULL && !marked;
+           t = gtk_widget_get_next_sibling (t))
+        marked = gtk_widget_has_css_class (t, "attention");
+
+      if (s->leaf == self->hover || s->leaf == focused || marked || menu)
+        gtk_widget_add_css_class (s->strip, "shown");
+      else
+        gtk_widget_remove_css_class (s->strip, "shown");
+    }
+}
+
+static void
+hover_at (MlnPanes *self, MlnNode *leaf)
+{
+  if (leaf == self->hover)
+    return;
+
+  g_clear_pointer (&self->hover, mln_node_unref);
+  self->hover = leaf != NULL ? mln_node_ref (leaf) : NULL;
+  corner_shown (self);
+}
+
+static void
+on_pointer_motion (GtkEventControllerMotion *motion, double x, double y, gpointer data)
+{
+  MlnPanes *self = data;
+  Strip *s = self->strips != NULL ? strip_at (self, x, y) : NULL;
+
+  hover_at (self, s != NULL ? s->leaf : NULL);
+}
+
+static void
+on_pointer_leave (GtkEventControllerMotion *motion, gpointer data)
+{
+  hover_at (data, NULL);
+}
+
+static void
+on_focus_moved (GObject *root, GParamSpec *spec, gpointer data)
+{
+  corner_shown (data);
+}
+
+/* The focus is the window's, so heard from the window: from the one this
+   is in, while it is in one. */
+static void
+watch_focus (MlnPanes *self, GtkWidget *root)
+{
+  if (self->watched == root)
+    return;
+
+  if (self->watched != NULL)
+    {
+      g_signal_handler_disconnect (self->watched, self->focus_handler);
+      g_object_remove_weak_pointer (G_OBJECT (self->watched), (gpointer *) &self->watched);
+      self->focus_handler = 0;
+    }
+
+  self->watched = root;
+
+  if (root != NULL)
+    {
+      g_object_add_weak_pointer (G_OBJECT (root), (gpointer *) &self->watched);
+      self->focus_handler = g_signal_connect (root, "notify::focus-widget",
+                                              G_CALLBACK (on_focus_moved), self);
+    }
+}
+
 /* ---- laying out ---- */
 
 static int
@@ -2656,6 +2925,20 @@ place (GtkWidget *w, Box b)
 
 static void allocate_node (MlnPanes *self, MlnNode *node, Box box);
 
+/* The corner's width changed somewhere, said after the allocation that
+   changed it: an app that makes room for it changes a margin, which is
+   another allocation. */
+static gboolean
+corner_changed (gpointer data)
+{
+  MlnPanes *self = data;
+
+  self->corner_idle = 0;
+  g_signal_emit (self, signals[CORNER_CHANGED], 0);
+
+  return G_SOURCE_REMOVE;
+}
+
 static void
 allocate_leaf (MlnPanes *self, MlnNode *leaf, Box box)
 {
@@ -2664,7 +2947,32 @@ allocate_leaf (MlnPanes *self, MlnNode *leaf, Box box)
   guint active = mln_node_active (leaf);
   int sh = s != NULL ? strip_height (self, s) : 0;
 
-  if (s != NULL)
+  if (s != NULL && main_of (self)->header == MLN_HEADER_CORNER)
+    {
+      /* In the top corner at the end of the line, over the pane, at its
+         own width; the pane has the whole leaf. */
+      int mw = 0, nw = 0, gap = 3;
+
+      gtk_widget_measure (s->strip, GTK_ORIENTATION_HORIZONTAL, -1, &mw, &nw, NULL, NULL);
+      nw = MIN (nw, MAX (box.w - 2 * gap, mw));
+      /* Starting inside the leaf, whatever it is short of. */
+      s->tabs = (Box) { rtl (self) ? box.x + gap : MAX (box.x, box.x + box.w - gap - nw),
+                        box.y + gap, nw, sh };
+      place (s->strip, s->tabs);
+      s->box = box;
+      s->strip_h = sh;
+
+      if (s->corner_w != nw + gap)
+        {
+          s->corner_w = nw + gap;
+
+          if (main_of (self)->corner_idle == 0)
+            main_of (self)->corner_idle = g_idle_add_full (G_PRIORITY_HIGH_IDLE, corner_changed, main_of (self), NULL);
+        }
+
+      sh = 0;
+    }
+  else if (s != NULL)
     {
       int mw = 0;
 
@@ -2672,6 +2980,15 @@ allocate_leaf (MlnPanes *self, MlnNode *leaf, Box box)
       place (s->strip, (Box) { box.x, box.y, MAX (box.w, mw), sh });
       s->box = box;
       s->strip_h = sh;
+      s->tabs = (Box) { box.x, box.y, box.w, sh };
+
+      if (s->corner_w != 0)
+        {
+          s->corner_w = 0;
+
+          if (main_of (self)->corner_idle == 0)
+            main_of (self)->corner_idle = g_idle_add_full (G_PRIORITY_HIGH_IDLE, corner_changed, main_of (self), NULL);
+        }
     }
 
   if (active < live->len)
@@ -2976,6 +3293,7 @@ static void
 pane_free (Pane *p)
 {
   g_clear_object (&p->menu);
+  g_clear_object (&p->icon);
   g_free (p->id);
   g_free (p->title);
   g_free (p);
@@ -2987,6 +3305,9 @@ mln_panes_dispose (GObject *o)
   MlnPanes *self = MLN_PANES (o);
 
   g_clear_handle_id (&self->render_idle, g_source_remove);
+  g_clear_handle_id (&self->corner_idle, g_source_remove);
+  g_clear_pointer (&self->hover, mln_node_unref);
+  watch_focus (self, NULL);
 
   /* A floating window's: the panes' hosts back to the main one, hidden,
      and nothing of theirs let go -- they are the main one's. */
@@ -3122,6 +3443,7 @@ mln_panes_get_property (GObject *o, guint id, GValue *v, GParamSpec *spec)
     case PROP_LEAF_MIN_HEIGHT: g_value_set_int (v, self->least); break;
     case PROP_EDGE: g_value_set_double (v, self->edge); break;
     case PROP_SHOW_DRAWER: g_value_set_boolean (v, self->show_drawer); break;
+    case PROP_HEADER: g_value_set_enum (v, self->header); break;
     default: G_OBJECT_WARN_INVALID_PROPERTY_ID (o, id, spec);
     }
 }
@@ -3146,6 +3468,13 @@ mln_panes_set_property (GObject *o, guint id, const GValue *v, GParamSpec *spec)
       break;
     case PROP_SHOW_DRAWER:
       self->show_drawer = g_value_get_boolean (v);
+      render (self);
+      break;
+    case PROP_HEADER:
+      if (self->header == (MlnHeader) g_value_get_enum (v))
+        return;
+
+      self->header = g_value_get_enum (v);
       render (self);
       break;
     default:
@@ -3182,6 +3511,7 @@ static void
 mln_panes_map (GtkWidget *w)
 {
   GTK_WIDGET_CLASS (mln_panes_parent_class)->map (w);
+  watch_focus (MLN_PANES (w), GTK_WIDGET (gtk_widget_get_root (w)));
   render (MLN_PANES (w));
 }
 
@@ -3191,6 +3521,8 @@ mln_panes_unmap (GtkWidget *w)
   MlnPanes *self = MLN_PANES (w);
 
   GTK_WIDGET_CLASS (mln_panes_parent_class)->unmap (w);
+  watch_focus (self, NULL);
+  hover_at (self, NULL);
 
   /* Out of sight altogether: every pane shown here is told -- by the main
      one, which the signals are on. */
@@ -3235,6 +3567,9 @@ mln_panes_class_init (MlnPanesClass *klass)
   props[PROP_SHOW_DRAWER] =
     g_param_spec_boolean ("show-drawer", NULL, NULL, TRUE,
                           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY);
+  props[PROP_HEADER] =
+    g_param_spec_enum ("header", NULL, NULL, MLN_TYPE_HEADER, MLN_HEADER_STRIP,
+                       G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY);
   g_object_class_install_properties (oc, N_PROPS, props);
 
   signals[PANE_SHOWN] =
@@ -3249,6 +3584,9 @@ mln_panes_class_init (MlnPanesClass *klass)
   signals[PANE_DISCARD] =
     g_signal_new ("pane-discard", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+  signals[CORNER_CHANGED] =
+    g_signal_new ("corner-changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST,
+                  0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 
   gtk_widget_class_set_css_name (wc, "panes");
 
@@ -3312,6 +3650,14 @@ mln_panes_init (MlnPanes *self)
     g_signal_connect (target, "leave", G_CALLBACK (on_drop_leave), self);
     g_signal_connect (target, "drop", G_CALLBACK (on_drop), self);
     gtk_widget_add_controller (GTK_WIDGET (self), GTK_EVENT_CONTROLLER (target));
+  }
+
+  {
+    GtkEventController *motion = gtk_event_controller_motion_new ();
+
+    g_signal_connect (motion, "motion", G_CALLBACK (on_pointer_motion), self);
+    g_signal_connect (motion, "leave", G_CALLBACK (on_pointer_leave), self);
+    gtk_widget_add_controller (GTK_WIDGET (self), motion);
   }
 
   self->blank = gtk_label_new ("Every pane is closed. Reopen one from the row above.");
@@ -3475,6 +3821,8 @@ mln_panes_set_title (MlnPanes *self, const char *id, const char *title)
   g_free (p->title);
   p->title = g_strdup (title);
   gtk_label_set_text (GTK_LABEL (p->label), title);
+  gtk_accessible_update_property (GTK_ACCESSIBLE (p->tab),
+                                  GTK_ACCESSIBLE_PROPERTY_LABEL, title, -1);
 
   {
     char *name = g_strdup_printf ("Close %s", title);
@@ -3485,6 +3833,58 @@ mln_panes_set_title (MlnPanes *self, const char *id, const char *title)
   }
 
   render (self);
+}
+
+void
+mln_panes_set_icon (MlnPanes *self, const char *id, GIcon *icon)
+{
+  Pane *p = pane_of (self, id);
+
+  g_return_if_fail (icon == NULL || G_IS_ICON (icon));
+
+  if (p == NULL || !g_set_object (&p->icon, icon))
+    return;
+
+  gtk_image_set_from_gicon (GTK_IMAGE (p->image), icon);
+  render (self);
+}
+
+void
+mln_panes_set_header (MlnPanes *self, MlnHeader header)
+{
+  g_return_if_fail (MLN_IS_PANES (self));
+
+  g_object_set (self, "header", header, NULL);
+}
+
+MlnHeader
+mln_panes_get_header (MlnPanes *self)
+{
+  g_return_val_if_fail (MLN_IS_PANES (self), MLN_HEADER_STRIP);
+
+  return main_of (self)->header;
+}
+
+int
+mln_panes_get_corner_width (MlnPanes *self, const char *id)
+{
+  MlnNode *leaf;
+  MlnPanes *drawn;
+  Strip *s;
+
+  g_return_val_if_fail (MLN_IS_PANES (self), 0);
+
+  self = main_of (self);
+
+  if (self->model == NULL || self->header != MLN_HEADER_CORNER ||
+      (leaf = mln_model_leaf_with (self->model, id)) == NULL)
+    return 0;
+
+  drawn = drawer_of (self, leaf);
+  s = strip_for (drawn, leaf);
+
+  /* Not for a leaf a zoom has out of sight, which kept what it was. */
+  return s != NULL && is_visible_leaf (drawn, leaf) ? s->corner_w : 0;
 }
 
 void
@@ -3507,6 +3907,8 @@ mln_panes_set_attention (MlnPanes *self, const char *id, gboolean attention)
     gtk_widget_add_css_class (p->tab, "attention");
   else
     gtk_widget_remove_css_class (p->tab, "attention");
+
+  corner_shown (drawer_of (self, mln_model_leaf_with (self->model, id)));
 }
 
 void
