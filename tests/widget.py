@@ -498,7 +498,9 @@ def corner(d):
 
     # The inspector alone in its leaf: its tab is a grip, dragged onto the
     # other leaf's icons, before the first.
-    ix, iy = d.centre("inspector")
+    # On the grip, at the tab's start: its middle may be its cross.
+    x, y, w, h = d.geometry()["inspector"]["tab"]
+    ix, iy = x + 9, y + h / 2
 
     def before_editor(g):
         x, y, w, h = g["editor"]["tab"]
