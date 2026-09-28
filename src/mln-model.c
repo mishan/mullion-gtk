@@ -950,7 +950,17 @@ closed_list (MlnModel *m)
   /* The keys first, and `later' asked of them after: the app's answer is
      free to do anything, and a hash table iterated across it may not be
      there when it is done. */
-  kept_ids = g_hash_table_get_keys_as_ptr_array (m->closed_kept);
+  kept_ids = g_ptr_array_new_with_free_func (g_free);
+
+  {
+    GHashTableIter it;
+    const char *id;
+
+    g_hash_table_iter_init (&it, m->closed_kept);
+
+    while (g_hash_table_iter_next (&it, (gpointer *) &id, NULL))
+      g_ptr_array_add (kept_ids, g_strdup (id));
+  }
 
   for (guint i = 0; i < kept_ids->len; i++)
     {
