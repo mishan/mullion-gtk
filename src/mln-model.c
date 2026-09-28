@@ -887,24 +887,18 @@ read_kept (MlnModel *m, const char *text, GHashTable *closed, GPtrArray *floats)
       tree = NULL;
     }
 
-  /* The panes put away that would otherwise be put up (see open_missing),
-     from a layout that is one: a refused one says nothing. */
-  if (tree != NULL && envelope != NULL && closed != NULL)
-    {
-      const MlnJson *ids = mln_json_member (envelope, "closed");
-
-      for (guint i = 0; ids != NULL && mln_json_type (ids) == MLN_JSON_ARRAY &&
-                        i < mln_json_length (ids); i++)
-        if (mln_json_string (mln_json_index (ids, i)) != NULL)
-          g_hash_table_add (closed, g_strdup (mln_json_string (mln_json_index (ids, i))));
-    }
-
-  if (tree != NULL && envelope != NULL && floats != NULL)
+  /* The floating windows, from a main tree that is one -- or that is
+     empty, every pane having gone into a window: `{"tabs":[]}' is what an
+     emptied tree is kept as, and alone it is no layout, but with windows
+     holding the panes it is the main window's part of one. */
+  if (saved != NULL && sane (saved) && envelope != NULL && floats != NULL)
     {
       const MlnJson *wins = mln_json_member (envelope, "floating");
       GHashTable *taken = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+      guint had = floats->len;
 
-      take_tabs (tree, taken);
+      if (tree != NULL)
+        take_tabs (tree, taken);
 
       for (guint i = 0; wins != NULL && mln_json_type (wins) == MLN_JSON_ARRAY &&
                         i < mln_json_length (wins); i++)
@@ -942,6 +936,21 @@ read_kept (MlnModel *m, const char *text, GHashTable *closed, GPtrArray *floats)
         }
 
       g_hash_table_unref (taken);
+
+      if (tree == NULL && floats->len > had)
+        tree = new_leaf ();
+    }
+
+  /* The panes put away that would otherwise be put up (see open_missing),
+     from a layout that is one: a refused one says nothing. */
+  if (tree != NULL && envelope != NULL && closed != NULL)
+    {
+      const MlnJson *ids = mln_json_member (envelope, "closed");
+
+      for (guint i = 0; ids != NULL && mln_json_type (ids) == MLN_JSON_ARRAY &&
+                        i < mln_json_length (ids); i++)
+        if (mln_json_string (mln_json_index (ids, i)) != NULL)
+          g_hash_table_add (closed, g_strdup (mln_json_string (mln_json_index (ids, i))));
     }
 
   mln_json_free (got);
@@ -1185,7 +1194,8 @@ state (MlnModel *m)
     {
       Float *f = m->floats->pdata[i];
 
-      g_string_append_printf (out, "|%u:%dx%d:", f->id, f->w, f->h);
+      /* Not its size: resizing a window is not a change of layout. */
+      g_string_append_printf (out, "|%u:", f->id);
       write_node (out, f->root);
     }
 
@@ -1388,6 +1398,15 @@ parent_in (MlnModel *m, MlnNode *node)
   return root != NULL ? parent_of (*root, node) : NULL;
 }
 
+/* No floating windows, and nothing waiting in one to dock. */
+static void
+no_floats (MlnModel *m)
+{
+  g_ptr_array_set_size (m->floats, 0);
+  g_hash_table_remove_all (m->away_home);
+  g_hash_table_remove_all (m->away_spot);
+}
+
 static void
 drop_float (MlnModel *m, Float *f)
 {
@@ -1447,16 +1466,20 @@ empty (MlnModel *m, MlnNode *leaf)
     replace_kid (over, up, only);
 
   /* A pane closed beside this split, and waiting to come back beside it,
-     comes back beside what is left of it. */
-  g_hash_table_iter_init (&it, m->spot);
+     comes back beside what is left of it -- one waiting in a floating
+     window to dock beside it too. */
+  for (int t = 0; t < 2; t++)
+    {
+      g_hash_table_iter_init (&it, t == 0 ? m->spot : m->away_spot);
 
-  while (g_hash_table_iter_next (&it, NULL, (gpointer *) &s))
-    if (s->next == up)
-      {
-        set_node (&s->next, only);
-        s->has_via = TRUE;
-        s->via = up->dir;
-      }
+      while (g_hash_table_iter_next (&it, NULL, (gpointer *) &s))
+        if (s->next == up)
+          {
+            set_node (&s->next, only);
+            s->has_via = TRUE;
+            s->via = up->dir;
+          }
+    }
 
   mln_node_unref (up);
   mln_node_unref (only);
@@ -1560,7 +1583,6 @@ dismiss (MlnModel *m, const char *id)
    (nowhere in particular), null (the end), or a pane. */
 typedef enum { ANYWHERE, AT_END, BEFORE } Place;
 
-/* Into a leaf, as the tab in front of it. */
 /* A pane that has just left the main tree for a floating window: where
    it was in it -- the home and spot that closing it out of there wrote --
    kept apart from those, which a move inside the window would overwrite,
@@ -1590,6 +1612,7 @@ leave_main (MlnModel *m, const char *id)
     g_hash_table_remove (m->away_spot, id);
 }
 
+/* Into a leaf, as the tab in front of it. */
 static void
 into (MlnModel *m, const char *id, MlnNode *leaf, Place place, const char *before)
 {
@@ -1761,15 +1784,19 @@ reopen (MlnModel *m, const char *id, MlnNode *fallback, MlnNode *avoid)
         replace_kid (up, next, pair);
 
       /* The split this was closed out of, made again: a pane closed
-         beside it before it collapsed goes beside it again. */
-      g_hash_table_iter_init (&it, m->spot);
+         beside it before it collapsed goes beside it again, and one
+         waiting in a floating window docks beside it again. */
+      for (int t = 0; t < 2; t++)
+        {
+          g_hash_table_iter_init (&it, t == 0 ? m->spot : m->away_spot);
 
-      while (g_hash_table_iter_next (&it, NULL, (gpointer *) &s))
-        if (s->next == next && s->has_via && s->via == was->dir)
-          {
-            set_node (&s->next, pair);
-            s->has_via = FALSE;
-          }
+          while (g_hash_table_iter_next (&it, NULL, (gpointer *) &s))
+            if (s->next == next && s->has_via && s->via == was->dir)
+              {
+                set_node (&s->next, pair);
+                s->has_via = FALSE;
+              }
+        }
 
       mln_node_unref (next);
       mln_node_unref (pair);
@@ -1902,10 +1929,12 @@ open_missing (MlnModel *m, GHashTable *closed)
   return any;
 }
 
+/* A zoom is let go of for a leaf in the main tree it hides; a floating
+   window's is in a window of its own, and hides nothing. */
 static void
 unzoom_for (MlnModel *m, MlnNode *leaf)
 {
-  if (m->zoom != NULL && m->zoom != leaf)
+  if (m->zoom != NULL && m->zoom != leaf && holds (m->tree, leaf))
     set_node (&m->zoom, NULL);
 }
 
@@ -2044,7 +2073,7 @@ mln_model_set_mode (MlnModel *m, const char *mode)
   /* What the last mode's kept layout said was closed is about that
      mode's. */
   g_hash_table_remove_all (m->closed_kept);
-  g_ptr_array_set_size (m->floats, 0);
+  no_floats (m);
   set_node (&m->zoom, NULL);
   set_node (&m->focus, NULL);
 }
@@ -2330,7 +2359,7 @@ mln_model_load (MlnModel *m, const char *text)
   gboolean used;
 
   g_hash_table_remove_all (m->closed_kept);
-  g_ptr_array_set_size (m->floats, 0);
+  no_floats (m);
   saved = text != NULL ? read_kept (m, text, m->closed_kept, m->floats) : NULL;
   used = saved != NULL;
 
@@ -2391,7 +2420,7 @@ mln_model_set_layout (MlnModel *m, const char *json)
 
   /* The app's layout is the whole of it: floating windows go, and what
      was in them is where the layout puts it, or closed. */
-  g_ptr_array_set_size (m->floats, 0);
+  no_floats (m);
   set_tree (m, made);
   mln_node_unref (made);
   stray (m);
@@ -2412,7 +2441,7 @@ mln_model_reset (MlnModel *m)
 
   set_node (&m->zoom, NULL);
   g_hash_table_remove_all (m->closed_kept);
-  g_ptr_array_set_size (m->floats, 0);
+  no_floats (m);
   made = fresh (m);
   set_tree (m, made);
   mln_node_unref (made);
@@ -2755,13 +2784,15 @@ mln_model_set_float_size (MlnModel *m, guint id, int w, int h)
   if (f == NULL || (f->w == w && f->h == h))
     return;
 
+  /* Not a change, nor kept by itself: the next change keeps it, or
+     mln_model_keep. */
   f->w = w;
   f->h = h;
+}
 
-  /* Kept, not told of: a window's size is the person's, and no one else
-     acts on it. */
-  g_free (m->last);
-  m->last = state (m);
+void
+mln_model_keep (MlnModel *m)
+{
   save (m);
 }
 
@@ -2797,6 +2828,17 @@ mln_model_undock (MlnModel *m, const char *id, int w, int h)
      was; and apart from those, where it was in the main tree. */
   {
     gboolean leaving = from != NULL && holds (m->tree, from);
+
+    /* A closed pane remembers where it was as a close does, and that is
+       where it docks back to, as it would reopen there. */
+    if (from == NULL)
+      {
+        MlnNode *home = g_hash_table_lookup (m->home, mine);
+        Spot *was_at = g_hash_table_lookup (m->spot, mine);
+
+        leaving = (home != NULL && holds (m->tree, home)) ||
+                  (was_at != NULL && holds (m->tree, was_at->next));
+      }
 
     drawer (m, mine);
     g_hash_table_remove (m->dismissed, mine);

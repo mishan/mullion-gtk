@@ -171,6 +171,30 @@ term (gpointer app)
 }
 #endif
 
+/* A floating window with a titlebar of its own, as an app's may have: its
+   size is the window's, titlebar and all. */
+static GtkWindow *
+make_window (MlnPanes *panes, gpointer app)
+{
+  GtkWidget *win = gtk_window_new ();
+
+  gtk_window_set_application (GTK_WINDOW (win), app);
+  gtk_window_set_titlebar (GTK_WINDOW (win), gtk_header_bar_new ());
+
+  return GTK_WINDOW (win);
+}
+
+/* A harness's way to destroy a floating window as an app might, not by
+   closing it. */
+static void
+destroy_console (GSimpleAction *action, GVariant *param, gpointer panes)
+{
+  GtkWindow *win = mln_panes_get_window (panes, "console");
+
+  if (win != NULL)
+    gtk_window_destroy (win);
+}
+
 static void
 clear_console (GSimpleAction *action, GVariant *param, gpointer data)
 {
@@ -232,6 +256,19 @@ activate (GtkApplication *app)
 
   if (g_getenv ("MLN_DEMO_ATTENTION") != NULL)
     mln_panes_set_attention (MLN_PANES (panes), g_getenv ("MLN_DEMO_ATTENTION"), TRUE);
+
+  if (g_getenv ("MLN_DEMO_HEADERBAR") != NULL)
+    mln_panes_set_window_func (MLN_PANES (panes), make_window, app, NULL);
+
+  {
+    GSimpleAction *d = g_simple_action_new ("destroy-console", NULL);
+
+    g_signal_connect (d, "activate", G_CALLBACK (destroy_console), panes);
+    g_action_map_add_action (G_ACTION_MAP (app), G_ACTION (d));
+    gtk_application_set_accels_for_action (app, "app.destroy-console",
+                                           (const char *[]) { "<Control>d", NULL });
+    g_object_unref (d);
+  }
 
   mln_panes_set_default (MLN_PANES (panes), "main", LAYOUT);
   mln_panes_set_mode (MLN_PANES (panes), "main");

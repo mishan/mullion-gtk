@@ -25,11 +25,15 @@ Work in progress. What is here so far:
 A pane can go into a window of its own: its tab menu's Move to New
 Window, `mln_panes_undock`, or a tab dragged out of the window and let go
 over nothing. Tabs drag between windows as within one, splits and all,
-and closing a floating window puts what was in it back where it was.
-The app can make the windows (`mln_panes_set_window_func`); otherwise
-each is transient for the main window and of its application. They are
-kept with the layout, with their sizes. Positions are not: Wayland does
-not give them, and X11's are the window manager's.
+and closing a floating window puts what was in it back where it was in
+the main window (remembered for the session, not kept with the layout).
+
+The app can make the windows (`mln_panes_set_window_func`), and should
+where its panes' menus name window actions; otherwise each is transient
+for the main window and of its application. A window the app destroys
+is made again; closing one docks it. They are kept with the layout, with
+their sizes. Positions are not: Wayland does not give them, and X11's
+are the window manager's.
 
 ## What it adds to mullion's layouts
 
@@ -48,11 +52,11 @@ needs that a page does not:
   comes up in a layout kept by the one before, and one a person closed
   stays closed.
 
-Both are written only when there are any, in the version's envelope where
+They are written only when there are any, in the version's envelope where
 the app gives a version and in one of their own (`{"layout":…}` with
 them) where it does not. mullion reads that one as no layout.
 
-A layout that uses neither is written exactly as mullion writes it. One
+A layout that uses none of them is written exactly as mullion writes it. One
 kept by mullion has neither: a layout that goes through the web and back
 comes back without its slots.
 

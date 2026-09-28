@@ -1144,6 +1144,16 @@ floating_windows_are_kept (void)
   g_assert_true (mln_model_set_version (f.m, "1"));
   mln_model_undock (f.m, "c", 500, 250);
   mln_model_set_float_size (f.m, only_float (&f), 510, 260);
+
+  /* A resize is not a change, and keeps nothing by itself. */
+  {
+    int changed = f.h.changed;
+
+    g_assert_null (strstr (f.h.kept, "510"));
+    mln_model_keep (f.m);
+    g_assert_cmpint (f.h.changed, ==, changed);
+  }
+
   g_assert_cmpstr (f.h.kept, ==, "{\"version\":1,\"layout\":{\"tabs\":[\"a\",\"b\"],\"active\":0},"
                    "\"floating\":[{\"layout\":{\"tabs\":[\"c\"],\"active\":0},\"size\":[510,260]}]}");
 
@@ -1201,6 +1211,88 @@ floating_windows_are_kept (void)
   teardown (&f);
 }
 
+
+static void
+every_pane_floating (void)
+{
+  Fixture f;
+  char *kept;
+
+  setup (&f, "a b", NULL, FALSE);
+  mln_model_undock (f.m, "a", 0, 0);
+  mln_model_undock (f.m, "b", 0, 0);
+  g_assert_cmpstr (f.h.kept, ==, "{\"layout\":{\"tabs\":[]},\"floating\":["
+                   "{\"layout\":{\"tabs\":[\"a\"],\"active\":0}},"
+                   "{\"layout\":{\"tabs\":[\"b\"],\"active\":0}}]}");
+
+  /* Read back: the windows, and a main window with nothing in it. */
+  kept = g_strdup (f.h.kept);
+  g_assert_true (mln_model_load (f.m, kept));
+
+  {
+    GArray *ids = mln_model_floats (f.m);
+
+    g_assert_cmpuint (ids->len, ==, 2);
+    g_array_unref (ids);
+  }
+
+  g_assert_cmpint (mln_model_where (f.m, "a"), ==, MLN_WHERE_FRONT);
+
+  /* Alone, an emptied tree is still no layout. */
+  g_assert_false (mln_model_load (f.m, "{\"layout\":{\"tabs\":[]},\"closed\":[\"a\"]}"));
+  g_free (kept);
+  teardown (&f);
+}
+
+static void
+floats_leave_the_zoom_alone (void)
+{
+  Fixture f;
+
+  setup (&f, "a b c",
+         "{\"dir\":\"row\",\"size\":[1,1],\"kids\":[{\"tabs\":[\"a\"]},{\"tabs\":[\"b\",\"c\"]}]}",
+         FALSE);
+  mln_model_undock (f.m, "c", 0, 0);
+  mln_model_set_zoom (f.m, mln_model_leaf_with (f.m, "a"));
+
+  /* Presented in its window: the main window's zoom is not its. */
+  mln_model_present (f.m, "c", NULL, NULL);
+  g_assert_true (mln_model_get_zoom (f.m) == mln_model_leaf_with (f.m, "a"));
+  teardown (&f);
+}
+
+static void
+dock_beside_a_collapsed_split (void)
+{
+  Fixture f;
+  guint id;
+
+  /* a leaves for a window from beside a column; the column collapses
+     while it is away; it docks beside what is left, as a close and a
+     reopen would. */
+  setup (&f, "a b c",
+         "{\"dir\":\"row\",\"size\":[1,1],\"kids\":[{\"tabs\":[\"a\"]},"
+         "{\"dir\":\"col\",\"size\":[1,1],\"kids\":[{\"tabs\":[\"b\"]},{\"tabs\":[\"c\"]}]}]}",
+         FALSE);
+  id = mln_model_undock (f.m, "a", 0, 0);
+  mln_model_close (f.m, "c");
+  mln_model_dock (f.m, id);
+  assert_tree (&f, "{\"dir\":\"row\",\"size\":[0.5,0.5],\"kids\":[{\"tabs\":[\"a\"],\"active\":0},"
+                   "{\"tabs\":[\"b\"],\"active\":0}]}");
+  teardown (&f);
+
+  /* And a closed pane undocked docks where it was closed from. */
+  setup (&f, "a b",
+         "{\"dir\":\"col\",\"size\":[1,1],\"kids\":[{\"tabs\":[\"a\"]},{\"tabs\":[\"b\"]}]}",
+         FALSE);
+  mln_model_close (f.m, "b");
+  id = mln_model_undock (f.m, "b", 0, 0);
+  mln_model_dock (f.m, id);
+  assert_tree (&f, "{\"dir\":\"col\",\"size\":[0.5,0.5],\"kids\":[{\"tabs\":[\"a\"],\"active\":0},"
+                   "{\"tabs\":[\"b\"],\"active\":0}]}");
+  teardown (&f);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1244,6 +1336,9 @@ main (int argc, char **argv)
   g_test_add_func ("/model/a-window-of-its-own-tree", a_window_of_its_own_tree);
   g_test_add_func ("/model/dock-one-pane", dock_one_pane);
   g_test_add_func ("/model/floating-windows-are-kept", floating_windows_are_kept);
+  g_test_add_func ("/model/every-pane-floating", every_pane_floating);
+  g_test_add_func ("/model/floats-leave-the-zoom-alone", floats_leave_the_zoom_alone);
+  g_test_add_func ("/model/dock-beside-a-collapsed-split", dock_beside_a_collapsed_split);
 
   return g_test_run ();
 }

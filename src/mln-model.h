@@ -236,10 +236,14 @@ MlnNode    *mln_model_float_root    (MlnModel *m, guint id);
 guint       mln_model_float_of      (MlnModel *m, MlnNode *node);
 
 /* The size a floating window was last given, 0 by 0 for none yet; set
-   by the widget as it is resized, and kept with the layout, not told of
-   as a change. */
+   by the widget as it is resized. Not a change: kept with the next one,
+   or by mln_model_keep. */
 gboolean    mln_model_float_size    (MlnModel *m, guint id, int *w, int *h);
 void        mln_model_set_float_size (MlnModel *m, guint id, int w, int h);
+
+/* The layout kept as it is now, changed or not: for what is kept without
+   being a change, a window's size. */
+void        mln_model_keep          (MlnModel *m);
 
 /* A pane into a floating window of its own, `w' by `h'. The window's id,
    or 0 if it is not a pane in play or there is no layout. One change. */

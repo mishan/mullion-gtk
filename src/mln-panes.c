@@ -347,6 +347,10 @@ struct _MlnPanes
   char *drag_id;
   gboolean dragging;
   gboolean handing_off;         /* hand_off is ending the gesture */
+  gboolean rendering;           /* the main one, in sync_children */
+  gboolean disposed;
+  gboolean drag_over;           /* a drag between windows is over one */
+  guint keep_idle;              /* a floating window's size to keep */
   Drop drop;
   GtkWidget *hint;
 
@@ -358,6 +362,13 @@ struct _MlnPanes
   MlnPanes *owner;
   guint float_id;
 
+  /* A floating window's: the default size it was given, and what the
+     window's allocation falls short of it by -- the frame a window with a
+     titlebar of its own draws around itself -- once it has been seen. */
+  int asked_w, asked_h;
+  int pad_w, pad_h;
+  gboolean padded;
+
   /* The main one's floating windows, and how the app makes one. */
   GPtrArray *floats;            /* FloatWin* */
   MlnWindowFunc window_func;
@@ -366,14 +377,12 @@ struct _MlnPanes
 };
 
 /* A floating window: the model's id for it, the window, and the MlnPanes
-   in it. `win' is NULL once the window has gone some other way than this
-   closing it. */
+   in it. The window is the toplevel list's, not held here. */
 typedef struct
 {
   guint id;
   GtkWindow *win;
   MlnPanes *panes;
-  gulong destroy_handler;
 } FloatWin;
 
 G_DEFINE_FINAL_TYPE (MlnPanes, mln_panes, GTK_TYPE_WIDGET)
@@ -402,6 +411,7 @@ enum
 static guint signals[N_SIGNALS];
 
 static void render (MlnPanes *self);
+static gboolean render_now (gpointer data);
 static void on_tab_drag_begin (GtkGestureDrag *g, double x, double y, gpointer data);
 static void on_tab_drag_update (GtkGestureDrag *g, double x, double y, gpointer data);
 static void on_tab_drag_end (GtkGestureDrag *g, double x, double y, gpointer data);
@@ -1144,6 +1154,15 @@ sync_one (MlnPanes *self, GHashTable *front)
 
   if (self->owner == NULL)
     {
+      GArray *ids = mln_model_floats (self->model);
+      const char *why = ids->len > 0
+        ? "Every pane is in a window of its own."
+        : "Every pane is closed. Reopen one from the row above.";
+
+      if (g_strcmp0 (gtk_label_get_text (GTK_LABEL (self->blank)), why) != 0)
+        gtk_label_set_text (GTK_LABEL (self->blank), why);
+
+      g_array_unref (ids);
       gtk_widget_set_child_visible (self->blank, !some);
       fill_drawer (self);
     }
@@ -1234,7 +1253,17 @@ sync_children (MlnPanes *self)
       if (mln_model_float_root (self->model, fw->id) == NULL)
         float_close (self, fw);
       else
-        float_title (fw);
+        {
+          /* Nothing in it in play -- its panes' mode is down -- is a window
+             out of sight until there is. */
+          gboolean some = mln_model_alive (self->model,
+                                           mln_model_float_root (self->model, fw->id));
+
+          if (gtk_widget_get_visible (GTK_WIDGET (fw->win)) != some)
+            gtk_widget_set_visible (GTK_WIDGET (fw->win), some);
+
+          float_title (fw);
+        }
     }
 
   g_array_unref (ids);
@@ -1287,8 +1316,34 @@ render (MlnPanes *self)
 {
   self = main_of (self);
 
-  if (mln_model_loaded (self->model))
-    sync_children (self);
+  if (self->disposed || self->model == NULL || !mln_model_loaded (self->model))
+    return;
+
+  /* Asked from inside itself -- a window it opens maps then and there and
+     asks -- it is done again once it has finished, rather than in the
+     middle of its own lists. */
+  if (self->rendering)
+    {
+      if (self->render_idle == 0)
+        self->render_idle = g_idle_add (render_now, self);
+
+      return;
+    }
+
+  self->rendering = TRUE;
+  sync_children (self);
+  self->rendering = FALSE;
+}
+
+static gboolean
+render_now (gpointer data)
+{
+  MlnPanes *self = data;
+
+  self->render_idle = 0;
+  render (self);
+
+  return G_SOURCE_REMOVE;
 }
 
 
@@ -1316,10 +1371,11 @@ on_float_close (GtkWindow *win, gpointer data)
   return TRUE;
 }
 
-/* A window gone some other way than float_close -- the app closing its
-   windows as it quits, the one it is transient for destroyed with it: the
-   panes' hosts are out of it already (see dispose), and the model keeps
-   the window, which comes back when the layout is next loaded. */
+/* A window destroyed some other way than float_close -- by the app, or
+   with the window it is transient for: the panes' hosts are out of it
+   already (see dispose). The model still has the window, which is made
+   again at the next render while this one is on screen: to take one away
+   for good, close it (which docks it) or dock what is in it. */
 static void
 on_float_destroyed (GtkWidget *win, gpointer data)
 {
@@ -1331,10 +1387,14 @@ on_float_destroyed (GtkWidget *win, gpointer data)
 
       if (GTK_WIDGET (fw->win) == win)
         {
-          fw->destroy_handler = 0;
-          g_clear_object (&fw->win);
+          g_ptr_array_remove_index (self->floats, k);
+          g_free (fw);
+          break;
         }
     }
+
+  if (!self->disposed && self->render_idle == 0)
+    self->render_idle = g_idle_add (render_now, self);
 }
 
 static void
@@ -1377,8 +1437,8 @@ float_open (MlnPanes *self, guint id)
         }
     }
 
-  g_object_ref (fw->win);
-
+  /* Not held: the toplevel list holds it, and only then is its destroy
+     told, however it is destroyed. */
   if (!mln_model_float_size (self->model, id, &w, &h) || w <= 0 || h <= 0)
     {
       w = 480;
@@ -1386,10 +1446,11 @@ float_open (MlnPanes *self, guint id)
     }
 
   gtk_window_set_default_size (fw->win, w, h);
+  inst->asked_w = w;
+  inst->asked_h = h;
   gtk_window_set_child (fw->win, GTK_WIDGET (inst));
   g_signal_connect (fw->win, "close-request", G_CALLBACK (on_float_close), self);
-  fw->destroy_handler = g_signal_connect (fw->win, "destroy",
-                                          G_CALLBACK (on_float_destroyed), self);
+  g_signal_connect (fw->win, "destroy", G_CALLBACK (on_float_destroyed), self);
   g_ptr_array_add (self->floats, fw);
   float_title (fw);
   gtk_window_present (fw->win);
@@ -1422,14 +1483,27 @@ float_title (FloatWin *fw)
 static void
 float_close (MlnPanes *self, FloatWin *fw)
 {
+  MlnPanes *inst = fw->panes;
+
   g_ptr_array_remove (self->floats, fw);
+
+  /* Detached from the main one before it goes: something may hold it
+     past its window -- a drop landing in it at idle -- and it must not
+     reach a model that is gone by then. */
+  if (inst->strips != NULL)
+    g_ptr_array_set_size (inst->strips, 0);
+
+  if (inst->dividers != NULL)
+    g_ptr_array_set_size (inst->dividers, 0);
+
+  inst->model = NULL;
+  inst->panes = NULL;
+  inst->order = NULL;
 
   if (fw->win != NULL)
     {
-      g_clear_signal_handler (&fw->destroy_handler, fw->win);
       g_signal_handlers_disconnect_by_data (fw->win, self);
       gtk_window_destroy (fw->win);
-      g_clear_object (&fw->win);
     }
 
   g_free (fw);
@@ -1681,9 +1755,16 @@ on_handoff_cancel (GdkDrag *drag, GdkDragCancelReason reason, gpointer data)
   /* Let go over nothing that takes it: into a window of its own. X11
      says there was no target; Wayland, that there was an error. Escape
      is a cancel, and is left one. */
+  /* Not over one of this app's windows, though: a drop one of them turned
+     down -- over a divider, say -- is a cancel too, and on Wayland an
+     error like any other. */
   if ((reason == GDK_DRAG_CANCEL_NO_TARGET || reason == GDK_DRAG_CANCEL_ERROR) &&
-      MLN_IS_PANES (ref->home) && mln_model_has (ref->home->model, ref->id))
+      MLN_IS_PANES (ref->home) && !ref->home->disposed && !ref->home->drag_over &&
+      mln_model_has (ref->home->model, ref->id))
     mln_panes_undock (ref->home, ref->id);
+
+  if (MLN_IS_PANES (ref->home))
+    ref->home->drag_over = FALSE;
 }
 
 static void
@@ -1713,15 +1794,31 @@ hand_off (MlnPanes *self, GtkGestureDrag *g, Pane *p, double x, double y)
   if (native == NULL || device == NULL)
     return;
 
+  /* How far the pointer is from where the drag began, as GtkDragSource
+     gives it: where a cancelled drag's icon goes back to. */
+  {
+    double gx = 0, gy = 0;
+    graphene_point_t start;
+
+    gtk_gesture_drag_get_start_point (g, &gx, &gy);
+
+    if (gtk_widget_compute_point (p->tab, GTK_WIDGET (native),
+                                  &GRAPHENE_POINT_INIT (gx, gy), &start))
+      {
+        sx = x - start.x;
+        sy = y - start.y;
+      }
+  }
+
   self->handing_off = TRUE;
   gtk_event_controller_reset (GTK_EVENT_CONTROLLER (g));
   self->handing_off = FALSE;
   end_drag (self);
 
   content = gdk_content_provider_new_typed (mln_pane_ref_get_type (), &ref);
-  gtk_native_get_surface_transform (native, &sx, &sy);
+
   drag = gdk_drag_begin (gtk_native_get_surface (native), device, content,
-                         GDK_ACTION_MOVE, x + sx, y + sy);
+                         GDK_ACTION_MOVE, sx, sy);
   g_object_unref (content);
 
   if (drag == NULL)
@@ -1749,8 +1846,11 @@ on_drop_motion (GtkDropTarget *target, double x, double y, gpointer data)
   const GValue *v = gtk_drop_target_get_value (target);
   MlnPaneRef *ref = v != NULL ? g_value_get_boxed (v) : NULL;
 
-  if (ref == NULL || ref->home != main_of (self) || !mln_model_has (self->model, ref->id))
+  if (ref == NULL || ref->home != main_of (self) || self->model == NULL ||
+      !mln_model_has (self->model, ref->id))
     return 0;
+
+  main_of (self)->drag_over = TRUE;
 
   if (!self->dragging || g_strcmp0 (self->drag_id, ref->id) != 0)
     {
@@ -1772,6 +1872,7 @@ on_drop_motion (GtkDropTarget *target, double x, double y, gpointer data)
 static void
 on_drop_leave (GtkDropTarget *target, gpointer data)
 {
+  main_of (data)->drag_over = FALSE;
   end_drag (data);
 }
 
@@ -1860,7 +1961,10 @@ land (gpointer data)
   MlnPanes *self = l->self;
   MlnNode *leaf = l->drop.leaf;
 
-  if (mln_model_has (self->model, l->id) && (leaf == NULL || mln_model_holds (self->model, leaf)))
+  /* A floating window's MlnPanes closed since the drop has let go of the
+     model. */
+  if (self->model != NULL && !main_of (self)->disposed &&
+      mln_model_has (self->model, l->id) && (leaf == NULL || mln_model_holds (self->model, leaf)))
     {
       switch (l->drop.kind)
         {
@@ -1888,7 +1992,8 @@ land (gpointer data)
 
           mln_model_set_focus (self->model, leaf);
 
-          if (zoom != NULL && zoom != leaf)
+          /* Only a drop in the main window hides behind its zoom. */
+          if (zoom != NULL && zoom != leaf && mln_model_float_of (self->model, leaf) == 0)
             mln_model_set_zoom (self->model, NULL);
         }
 
@@ -1896,7 +2001,8 @@ land (gpointer data)
 
       /* The window it landed in in front -- another one, for a drag
          between windows -- with its tab focused. */
-      if (leaf != NULL)
+      /* The pane can be gone: told it was shown, the app may remove it. */
+      if (leaf != NULL && self->model != NULL && pane_of (self, l->id) != NULL)
         {
           GtkWidget *tab = pane_of (self, l->id)->tab;
           GtkRoot *root = gtk_widget_get_root (tab);
@@ -2110,7 +2216,9 @@ toward (MlnPanes *self, MlnNode *leaf, int dx, int dy)
   MlnNode *best = NULL;
   double cx, cy, near = G_MAXDOUBLE;
 
-  if (mln_model_get_zoom (self->model) != NULL || here == NULL)
+  /* A zoom leaves nowhere to go in the main window; a floating window
+     has none. */
+  if ((self->owner == NULL && mln_model_get_zoom (self->model) != NULL) || here == NULL)
     return NULL;
 
   cx = here->box.x + here->box.w / 2.0;
@@ -2275,7 +2383,7 @@ on_key (GtkEventControllerKey *keys, guint keyval, guint code,
           to = mln_model_leaf_with (self->model, mine);
           zoom = mln_model_get_zoom (self->model);
 
-          if (zoom != NULL && zoom != to)
+          if (zoom != NULL && zoom != to && mln_model_float_of (self->model, to) == 0)
             mln_model_set_zoom (self->model, NULL);
 
           done (self, to);
@@ -2787,6 +2895,19 @@ mln_panes_measure (GtkWidget *w, GtkOrientation o, int for_size,
   *nat = MAX (*min, row ? 640 : 400);
 }
 
+static gboolean
+keep_now (gpointer data)
+{
+  MlnPanes *self = data;
+
+  self->keep_idle = 0;
+
+  if (!self->disposed && mln_model_loaded (self->model))
+    mln_model_keep (self->model);
+
+  return G_SOURCE_REMOVE;
+}
+
 static void
 mln_panes_size_allocate (GtkWidget *w, int width, int height, int baseline)
 {
@@ -2796,9 +2917,39 @@ mln_panes_size_allocate (GtkWidget *w, int width, int height, int baseline)
   int top = drawer_height (self);
 
   /* A floating window's size, kept with the layout for the next time it
-     is opened. */
-  if (self->owner != NULL && width > 0 && height > 0)
-    mln_model_set_float_size (self->model, self->float_id, width, height);
+     is opened: the window's, titlebar and all, which is what its default
+     size is -- not this widget's, which would lose the titlebar on every
+     round. Kept a moment after the last change, as a drag of its edge is
+     a size on every step. */
+  if (self->owner != NULL && self->model != NULL)
+    {
+      GtkRoot *root = gtk_widget_get_root (w);
+      int ww = root != NULL ? gtk_widget_get_width (GTK_WIDGET (root)) : 0;
+      int wh = root != NULL ? gtk_widget_get_height (GTK_WIDGET (root)) : 0;
+      int ow = 0, oh = 0;
+
+      /* In the default size's terms: what it was given, the first time. */
+      if (!self->padded && ww > 0 && wh > 0)
+        {
+          self->pad_w = self->asked_w - ww;
+          self->pad_h = self->asked_h - wh;
+          self->padded = TRUE;
+        }
+
+      ww += self->pad_w;
+      wh += self->pad_h;
+      mln_model_float_size (self->model, self->float_id, &ow, &oh);
+
+      if (ww > 0 && wh > 0 && (ww != ow || wh != oh))
+        {
+          mln_model_set_float_size (self->model, self->float_id, ww, wh);
+
+          if (self->owner->keep_idle != 0)
+            g_source_remove (self->owner->keep_idle);
+
+          self->owner->keep_idle = g_timeout_add (300, keep_now, self->owner);
+        }
+    }
   Box box = { 0, top, width, height - top };
 
   if (gtk_widget_get_child_visible (self->drawer))
@@ -2869,6 +3020,9 @@ mln_panes_dispose (GObject *o)
       G_OBJECT_CLASS (mln_panes_parent_class)->dispose (o);
       return;
     }
+
+  self->disposed = TRUE;
+  g_clear_handle_id (&self->keep_idle, g_source_remove);
 
   /* The floating windows, with the panes' hosts brought home first:
      destroying a window destroys what is in it. */
@@ -2997,6 +3151,17 @@ mln_panes_set_property (GObject *o, guint id, const GValue *v, GParamSpec *spec)
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (o, id, spec);
       return;
+    }
+
+  /* The floating windows draw with the main one's measures. */
+  for (guint k = 0; self->owner == NULL && k < self->floats->len; k++)
+    {
+      MlnPanes *inst = ((FloatWin *) self->floats->pdata[k])->panes;
+
+      inst->split = self->split;
+      inst->least = self->least;
+      inst->edge = self->edge;
+      gtk_widget_queue_resize (GTK_WIDGET (inst));
     }
 
   g_object_notify_by_pspec (o, spec);
@@ -3262,9 +3427,18 @@ mln_panes_remove (MlnPanes *self, const char *id)
   if (gtk_widget_get_parent (p->tab) != NULL)
     gtk_box_remove (GTK_BOX (gtk_widget_get_parent (p->tab)), p->tab);
 
-  /* Its menu, if it is open, is about a pane there no longer is. */
+  /* Its menu, if it is open, is about a pane there no longer is -- in
+     whichever window it is open. */
   if (self->menu != NULL && g_strcmp0 (self->menu_id, id) == 0)
     gtk_popover_popdown (GTK_POPOVER (self->menu));
+
+  for (guint k = 0; k < self->floats->len; k++)
+    {
+      MlnPanes *inst = ((FloatWin *) self->floats->pdata[k])->panes;
+
+      if (inst->menu != NULL && g_strcmp0 (inst->menu_id, id) == 0)
+        gtk_popover_popdown (GTK_POPOVER (inst->menu));
+    }
 
   host = MLN_HOST (p->host);
   content = g_object_ref (host->content);
@@ -3480,6 +3654,29 @@ void
 mln_panes_set_mode (MlnPanes *self, const char *mode)
 {
   mln_model_set_mode (self->model, mode);
+
+  /* The last mode's floating windows go now, not at the next load. */
+  for (guint k = self->floats->len; k-- > 0; )
+    {
+      FloatWin *fw = self->floats->pdata[k];
+
+      for (guint i = 0; i < self->order->len; i++)
+        {
+          Pane *p = self->order->pdata[i];
+
+          if (gtk_widget_get_parent (p->host) == GTK_WIDGET (fw->panes))
+            {
+              move_to (p->host, self);
+              gtk_widget_set_child_visible (p->host, FALSE);
+            }
+
+          if (gtk_widget_get_ancestor (p->tab, GTK_TYPE_WINDOW) == GTK_WIDGET (fw->win) &&
+              gtk_widget_get_parent (p->tab) != NULL)
+            gtk_box_remove (GTK_BOX (gtk_widget_get_parent (p->tab)), p->tab);
+        }
+
+      float_close (self, fw);
+    }
 }
 
 gboolean

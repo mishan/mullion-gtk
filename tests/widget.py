@@ -450,6 +450,30 @@ def drags_out_and_in(d):
           f"and dragged into another window's leaf, it lands there: {k}")
 
 
+def floats_destroyed(d):
+    x, y = d.centre("console")
+    d.s.click(int(x), int(y), window=W, button=3)
+    time.sleep(0.5)
+    d.key("n")                          # Move to _New Window
+    d.s.wait_window("Console")
+    d.settle()
+    d.s.key("ctrl+d")                   # the demo destroys it, as an app might
+    time.sleep(1.0)
+    d.s.wait_window("Console")
+    d.settle()
+    g = d.geometry()
+    check(g["console"].get("window") == "Console" and "tab" in g["console"],
+          f"a floating window destroyed by the app comes back, pane and all: {g['console']}")
+    check("console" in d.shown(), "and the pane in it is in view")
+
+
+def floats_keep_their_size(d):
+    d.click(*d.centre("drawing"))       # a change, to keep the layout
+    k = d.kept()
+    check(k["floating"][0].get("size") == [300, 200],
+          f"a floating window with a titlebar keeps the size it was given: {k['floating']}")
+
+
 def floats_kept(d):
     g = d.geometry()
     check(g["inspector"].get("window") == "Inspector",
@@ -484,6 +508,15 @@ scenario(floats)
 
 print("# drags_out_and_in")
 scenario(drags_out_and_in)
+
+print("# floats_destroyed")
+scenario(floats_destroyed)
+
+print("# floats_keep_their_size")
+scenario(floats_keep_their_size, env={"MLN_DEMO_HEADERBAR": "1", "MLN_DEMO_LAYOUT": json.dumps({
+    "layout": {"dir": "col", "size": [0.7, 0.3], "kids": [
+        {"tabs": ["editor", "drawing"]}, {"tabs": ["console"]}]},
+    "floating": [{"layout": {"tabs": ["inspector"]}, "size": [300, 200]}]})})
 
 print("# floats_kept")
 scenario(floats_kept, env={"MLN_DEMO_LAYOUT": json.dumps({
