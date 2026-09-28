@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-09-28
 
 - **A pinned corner**: `mln_panes_set_corner_pinned` keeps a pane's corner
   in sight while it is in front of its leaf, for a pane whose first row
