@@ -218,7 +218,6 @@ static const char *STYLE =
   "  border: none;"
   "}"
   "panes > .panedrawer > button.paneclosed { padding: 1px 8px; min-height: 22px; }"
-  "panes > tabs > tab > image.paneicon { margin-right: 6px; }"
   "panes > tabs.corner {"
   "  background-color: @theme_bg_color;"
   "  border: 1px solid alpha(@borders, 0.8);"
@@ -238,7 +237,6 @@ static const char *STYLE =
   "  background-color: alpha(@theme_selected_bg_color, 0.2);"
   "}"
   "panes > tabs.corner > tab.grip { background-color: transparent; }"
-  "panes > tabs.corner > tab > image.paneicon { margin: 0; }"
   "panes > tabs.corner > tab > button.shut { margin-left: 2px; }"
   "panes > tabs.corner > button.panemenu { min-width: 20px; min-height: 20px; padding: 0 2px; }"
   "label.panedragicon {"
@@ -1179,6 +1177,8 @@ sync_node (MlnPanes *self, MlnNode *node, GHashTable *drawn, GHashTable *front)
              switch to, but still a tab to drag it by and land the keys
              on. */
           gtk_widget_set_visible (p->image, p->icon != NULL && !alone);
+          /* Toward the title, whichever way the line runs. */
+          gtk_widget_set_margin_end (p->image, corner ? 0 : 6);
           gtk_widget_set_visible (p->label, !corner || (!alone && p->icon == NULL));
           gtk_widget_set_visible (p->grip, alone);
 
@@ -1276,18 +1276,6 @@ sync_one (MlnPanes *self, GHashTable *front)
   for (guint i = 0; i < self->dividers->len; i++)
     gtk_widget_set_child_visible (((Divider *) self->dividers->pdata[i])->bar, zoom == NULL);
 
-  /* The corner is drawn over the pane, so after it -- and under the drop
-     hint, which is last. */
-  if (main_of (self)->header == MLN_HEADER_CORNER)
-    {
-      for (guint i = 0; i < self->strips->len; i++)
-        gtk_widget_insert_before (((Strip *) self->strips->pdata[i])->strip,
-                                  GTK_WIDGET (self), NULL);
-
-      gtk_widget_insert_before (self->hint, GTK_WIDGET (self), NULL);
-    }
-
-  corner_shown (self);
 
   if (self->owner == NULL)
     {
@@ -1306,6 +1294,39 @@ sync_one (MlnPanes *self, GHashTable *front)
 
   g_hash_table_unref (drawn);
   gtk_widget_queue_resize (GTK_WIDGET (self));
+}
+
+/* The corner is drawn over the panes, so after every host -- and under
+   the drop hint, which is last. Moved only where something is out of
+   place: a move restyles what moved. After the hosts have gone where they
+   are drawn, which appends one that came from another window. */
+static void
+corner_on_top (MlnPanes *self)
+{
+  gboolean seen_strip = FALSE, out_of_place = FALSE;
+
+  if (main_of (self)->header != MLN_HEADER_CORNER)
+    return;
+
+  for (GtkWidget *w = gtk_widget_get_first_child (GTK_WIDGET (self));
+       w != NULL && !out_of_place; w = gtk_widget_get_next_sibling (w))
+    {
+      gboolean strip = g_strcmp0 (gtk_widget_get_css_name (w), "tabs") == 0;
+
+      if (strip)
+        seen_strip = TRUE;
+      else if (seen_strip && w != self->hint && !GTK_IS_POPOVER (w))
+        out_of_place = TRUE;
+    }
+
+  if (!out_of_place)
+    return;
+
+  for (guint i = 0; i < self->strips->len; i++)
+    gtk_widget_insert_before (((Strip *) self->strips->pdata[i])->strip,
+                              GTK_WIDGET (self), NULL);
+
+  gtk_widget_insert_before (self->hint, GTK_WIDGET (self), NULL);
 }
 
 static void float_open (MlnPanes *self, guint id);
@@ -1431,6 +1452,22 @@ sync_children (MlnPanes *self)
       }
 
     g_hash_table_unref (front);
+
+    /* The corners over what is now where it is drawn, and in sight where
+       a mark in them asks to be. */
+    corner_on_top (self);
+    corner_shown (self);
+
+    for (guint k = 0; k < self->floats->len; k++)
+      {
+        FloatWin *fw = self->floats->pdata[k];
+
+        if (fw->win != NULL)
+          {
+            corner_on_top (fw->panes);
+            corner_shown (fw->panes);
+          }
+      }
 
     g_object_ref (self);
 
@@ -2686,6 +2723,7 @@ menu_closed (GtkPopover *popover, gpointer data)
   MlnPanes *self = data;
 
   g_clear_pointer (&self->menu_id, g_free);
+  corner_shown (self);
 }
 
 static void
@@ -2791,8 +2829,17 @@ corner_shown (MlnPanes *self)
   for (guint i = 0; i < self->strips->len; i++)
     {
       Strip *s = self->strips->pdata[i];
+      gboolean marked = FALSE;
+      gboolean menu = self->menu_id != NULL &&
+                      mln_model_leaf_with (self->model, self->menu_id) == s->leaf;
 
-      if (s->leaf == self->hover || s->leaf == focused)
+      /* A tab marked for attention is a mark nobody would see in a
+         corner out of sight. */
+      for (GtkWidget *t = gtk_widget_get_first_child (s->strip); t != NULL && !marked;
+           t = gtk_widget_get_next_sibling (t))
+        marked = gtk_widget_has_css_class (t, "attention");
+
+      if (s->leaf == self->hover || s->leaf == focused || marked || menu)
         gtk_widget_add_css_class (s->strip, "shown");
       else
         gtk_widget_remove_css_class (s->strip, "shown");
@@ -2908,7 +2955,8 @@ allocate_leaf (MlnPanes *self, MlnNode *leaf, Box box)
 
       gtk_widget_measure (s->strip, GTK_ORIENTATION_HORIZONTAL, -1, &mw, &nw, NULL, NULL);
       nw = MIN (nw, MAX (box.w - 2 * gap, mw));
-      s->tabs = (Box) { rtl (self) ? box.x + gap : box.x + box.w - gap - nw,
+      /* Starting inside the leaf, whatever it is short of. */
+      s->tabs = (Box) { rtl (self) ? box.x + gap : MAX (box.x, box.x + box.w - gap - nw),
                         box.y + gap, nw, sh };
       place (s->strip, s->tabs);
       s->box = box;
@@ -2919,7 +2967,7 @@ allocate_leaf (MlnPanes *self, MlnNode *leaf, Box box)
           s->corner_w = nw + gap;
 
           if (main_of (self)->corner_idle == 0)
-            main_of (self)->corner_idle = g_idle_add (corner_changed, main_of (self));
+            main_of (self)->corner_idle = g_idle_add_full (G_PRIORITY_HIGH_IDLE, corner_changed, main_of (self), NULL);
         }
 
       sh = 0;
@@ -2939,7 +2987,7 @@ allocate_leaf (MlnPanes *self, MlnNode *leaf, Box box)
           s->corner_w = 0;
 
           if (main_of (self)->corner_idle == 0)
-            main_of (self)->corner_idle = g_idle_add (corner_changed, main_of (self));
+            main_of (self)->corner_idle = g_idle_add_full (G_PRIORITY_HIGH_IDLE, corner_changed, main_of (self), NULL);
         }
     }
 
@@ -3773,6 +3821,8 @@ mln_panes_set_title (MlnPanes *self, const char *id, const char *title)
   g_free (p->title);
   p->title = g_strdup (title);
   gtk_label_set_text (GTK_LABEL (p->label), title);
+  gtk_accessible_update_property (GTK_ACCESSIBLE (p->tab),
+                                  GTK_ACCESSIBLE_PROPERTY_LABEL, title, -1);
 
   {
     char *name = g_strdup_printf ("Close %s", title);
@@ -3812,17 +3862,29 @@ mln_panes_get_header (MlnPanes *self)
 {
   g_return_val_if_fail (MLN_IS_PANES (self), MLN_HEADER_STRIP);
 
-  return self->header;
+  return main_of (self)->header;
 }
 
 int
 mln_panes_get_corner_width (MlnPanes *self, const char *id)
 {
-  MlnNode *leaf = mln_model_leaf_with (self->model, id);
-  MlnPanes *drawn = drawer_of (self, leaf);
-  Strip *s = leaf != NULL ? strip_for (drawn, leaf) : NULL;
+  MlnNode *leaf;
+  MlnPanes *drawn;
+  Strip *s;
 
-  return s != NULL ? s->corner_w : 0;
+  g_return_val_if_fail (MLN_IS_PANES (self), 0);
+
+  self = main_of (self);
+
+  if (self->model == NULL || self->header != MLN_HEADER_CORNER ||
+      (leaf = mln_model_leaf_with (self->model, id)) == NULL)
+    return 0;
+
+  drawn = drawer_of (self, leaf);
+  s = strip_for (drawn, leaf);
+
+  /* Not for a leaf a zoom has out of sight, which kept what it was. */
+  return s != NULL && is_visible_leaf (drawn, leaf) ? s->corner_w : 0;
 }
 
 void
@@ -3845,6 +3907,8 @@ mln_panes_set_attention (MlnPanes *self, const char *id, gboolean attention)
     gtk_widget_add_css_class (p->tab, "attention");
   else
     gtk_widget_remove_css_class (p->tab, "attention");
+
+  corner_shown (drawer_of (self, mln_model_leaf_with (self->model, id)));
 }
 
 void

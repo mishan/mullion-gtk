@@ -519,6 +519,33 @@ def corner(d):
     check(d.lines("corner editor ")[-1] == "0", "with no corner to leave room for")
 
 
+def corner_after_a_window(d):
+    # Out into a window by the tab menu, and back by its window's: its host
+    # comes back into the main one, and must not come back over the corner.
+    x, y = d.centre("console")
+    d.s.click(int(x), int(y), window=W, button=3)
+    time.sleep(0.5)
+    d.key("n")                          # Move to _New Window
+    d.s.wait_window("Console")
+    d.settle()
+    x, y = d.centre("console")
+    d.s.click(int(x), int(y), window="Console", button=3)
+    time.sleep(0.5)
+    d.s.key("m")                        # Move to _Main Window
+    d.settle()
+    check("window" not in d.geometry()["console"], "back in the main window")
+
+    x, y, w, h = d.geometry()["console"]["tab"]
+
+    def before_editor(g):
+        x, y, w, h = g["editor"]["tab"]
+        return x + 3, y + h / 2
+
+    d.drag(x + 9, y + h / 2, before_editor)
+    check(tabs(d.kept())[0] == (["console", "editor", "drawing"], 0),
+          f"and its corner still over its pane, to drag it by: {tabs(d.kept())}")
+
+
 def right_to_left(d):
     ex, ey, ew, eh = d.geometry()["editor"]["leaf"]
     ix = d.geometry()["inspector"]["leaf"][0]
@@ -564,6 +591,9 @@ scenario(floats_kept, env={"MLN_DEMO_LAYOUT": json.dumps({
 
 print("# corner")
 scenario(corner, env={"MLN_DEMO_CORNER": "1"})
+
+print("# corner_after_a_window")
+scenario(corner_after_a_window, env={"MLN_DEMO_CORNER": "1"})
 
 print("# placed")
 scenario(placed, env={"MLN_DEMO_PLACEMENT": "1"})
