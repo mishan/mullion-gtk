@@ -167,10 +167,14 @@ def scenario(fn, env=None):
         s.capture(os.path.join(OUT, name + ".png"), window=W, park=True)
         code = d.quit()
         check(code == 0, f"{name}: the window closes cleanly ({code})")
-        # Any popover on Xvfb (no compositor) gets this one from GDK; a
-        # plain GtkPopoverMenu in a window of its own does too.
+        # Two that GDK says about the display rather than about this: any
+        # popover on Xvfb (no compositor) gets the first, a plain
+        # GtkPopoverMenu included; a sway without xdg_popup.reposition
+        # (Ubuntu 24.04's) gets the second, and GTK remaps the popup.
+        benign = ("gdk_frame_timings_submitted() called on submitted frame",
+                  "Compositor doesn't support moving popups, relying on remapping")
         log = "\n".join(l for l in open(d.log).read().splitlines()
-                        if "gdk_frame_timings_submitted() called on submitted frame" not in l)
+                        if not any(b in l for b in benign))
         check("CRITICAL" not in log and "WARNING" not in log,
               f"{name}: nothing warned")
         # And a sanitizer's report, which a demo stopped by the session

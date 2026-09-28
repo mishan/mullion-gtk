@@ -85,6 +85,7 @@ jobs:
 
       - name: As a subproject
         run: |
+          mkdir -p tests/consumer/subprojects
           ln -s "$GITHUB_WORKSPACE" tests/consumer/subprojects/mullion-gtk
           meson setup consumer tests/consumer --prefix "$RUNNER_TEMP/consumer"
           ninja -C consumer install
