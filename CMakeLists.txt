@@ -53,9 +53,13 @@ install(TARGETS mullion-gtk
 install(FILES src/mullion-gtk.h src/mln-panes.h
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/${MLN_PACKAGE})
 
+# The prefix relative to where the file is, so that it is right wherever
+# the library ends up: `cmake --install --prefix' says where only after
+# this was written.
+file(RELATIVE_PATH MLN_PC_UP "/${CMAKE_INSTALL_LIBDIR}/pkgconfig" "/")
 set(MLN_PC ${CMAKE_CURRENT_BINARY_DIR}/${MLN_PACKAGE}.pc)
 file(WRITE ${MLN_PC}
-"prefix=${CMAKE_INSTALL_PREFIX}
+"prefix=\${pcfiledir}/${MLN_PC_UP}
 includedir=\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}
 libdir=\${prefix}/${CMAKE_INSTALL_LIBDIR}
 
