@@ -367,6 +367,41 @@ def placed(d):
           f"closed, it is kept as closed: {k}")
 
 
+def floats(d):
+    x, y = d.centre("console")
+    d.s.click(int(x), int(y), window=W, button=3)
+    time.sleep(0.5)
+    d.key("n")                          # Move to _New Window
+    d.s.wait_window("Console")
+    d.settle()
+    g = d.geometry()
+    k = d.kept()
+    check(g["console"].get("window") == "Console" and "tab" in g["console"],
+          f"a tab's menu moves its pane into a window of its own: {g['console']}")
+    check("floating" in k and tabs(k["floating"][0]["layout"]) == [(["console"], 0)] and
+          all("console" not in t for t, _ in tabs(k["layout"])),
+          f"which is kept with the layout: {k}")
+    check("console" in d.shown(), "and the pane in it is in view")
+
+    # Its own tab menu, in its own window: back where it came from.
+    x, y = d.centre("console")
+    d.s.click(int(x), int(y), window="Console", button=3)
+    time.sleep(0.5)
+    d.s.key("m")                        # Move to _Main Window
+    d.settle()
+    k = d.kept()
+    check("floating" not in k and tabs(k)[1] == (["console"], 0),
+          f"and its menu moves it back, where it was: {k}")
+    check("window" not in d.geometry()["console"], "the window is gone")
+
+
+def floats_kept(d):
+    g = d.geometry()
+    check(g["inspector"].get("window") == "Inspector",
+          f"a kept layout's floating window comes up with it: {g['inspector']}")
+    check("inspector" in d.shown(), "with its pane in view")
+
+
 def right_to_left(d):
     ex, ey, ew, eh = d.geometry()["editor"]["leaf"]
     ix = d.geometry()["inspector"]["leaf"][0]
@@ -389,6 +424,15 @@ for fn in (starts, raises, closes_and_reopens, drags_beside, drags_onto_a_strip,
 
 # On X11 with no window manager, GTK puts a right-to-left window at
 # x = 1 - width, off the screen; sway puts it where it goes.
+print("# floats")
+scenario(floats)
+
+print("# floats_kept")
+scenario(floats_kept, env={"MLN_DEMO_LAYOUT": json.dumps({
+    "layout": {"dir": "col", "size": [0.7, 0.3], "kids": [
+        {"tabs": ["editor", "drawing"]}, {"tabs": ["console"]}]},
+    "floating": [{"layout": {"tabs": ["inspector"]}, "size": [300, 200]}]})})
+
 print("# placed")
 scenario(placed, env={"MLN_DEMO_PLACEMENT": "1"})
 

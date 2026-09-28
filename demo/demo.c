@@ -57,24 +57,33 @@ geometry (GtkWidget *widget, GdkFrameClock *clock, gpointer data)
   MlnPanes *panes = MLN_PANES (widget);
   GString *out = g_string_new ("geometry {");
   graphene_rect_t r;
-  double x = 0, y = 0;
-  GtkNative *native = gtk_widget_get_native (GTK_WIDGET (panes));
-  graphene_point_t at;
-
-  /* In the window's coordinates, which is what a harness clicks in. */
-  if (native != NULL &&
-      gtk_widget_compute_point (GTK_WIDGET (panes), GTK_WIDGET (native),
-                                &GRAPHENE_POINT_INIT (0, 0), &at))
-    {
-      x = at.x;
-      y = at.y;
-    }
 
   for (guint i = 0; i < G_N_ELEMENTS (IDS); i++)
     {
       const char *sep = "";
+      GtkWindow *win = mln_panes_get_window (panes, IDS[i]);
+      GtkWidget *drawn = win != NULL ? gtk_window_get_child (win) : widget;
+      GtkNative *native = gtk_widget_get_native (drawn);
+      graphene_point_t at;
+      double x = 0, y = 0;
+
+      /* In the coordinates of the window it is in, which is what a
+         harness clicks in; and which window that is, by title. */
+      if (native != NULL &&
+          gtk_widget_compute_point (drawn, GTK_WIDGET (native),
+                                    &GRAPHENE_POINT_INIT (0, 0), &at))
+        {
+          x = at.x;
+          y = at.y;
+        }
 
       g_string_append_printf (out, "%s\"%s\":{", i ? "," : "", IDS[i]);
+
+      if (win != NULL)
+        {
+          g_string_append_printf (out, "\"window\":\"%s\"", gtk_window_get_title (win));
+          sep = ",";
+        }
 
 #define PART(name, get)                                                    \
       if (get (panes, IDS[i], &r))                                          \

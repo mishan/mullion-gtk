@@ -345,7 +345,29 @@ struct _MlnPanes
 
   GtkWidget *menu;              /* the tab menu that is open, if one is */
   char *menu_id;                /* whose */
+
+  /* A floating window's MlnPanes draws that window's tree with the main
+     one's model and panes: `owner' is the main one, NULL for it. */
+  MlnPanes *owner;
+  guint float_id;
+
+  /* The main one's floating windows, and how the app makes one. */
+  GPtrArray *floats;            /* FloatWin* */
+  MlnWindowFunc window_func;
+  gpointer window_data;
+  GDestroyNotify window_destroy;
 };
+
+/* A floating window: the model's id for it, the window, and the MlnPanes
+   in it. `win' is NULL once the window has gone some other way than this
+   closing it. */
+typedef struct
+{
+  guint id;
+  GtkWindow *win;
+  MlnPanes *panes;
+  gulong destroy_handler;
+} FloatWin;
 
 G_DEFINE_FINAL_TYPE (MlnPanes, mln_panes, GTK_TYPE_WIDGET)
 
@@ -386,6 +408,82 @@ pane_of (MlnPanes *self, const char *id)
   return id == NULL ? NULL : g_hash_table_lookup (self->panes, id);
 }
 
+/* The main MlnPanes, which the model's hooks and the signals are on. */
+static MlnPanes *
+main_of (MlnPanes *self)
+{
+  return self->owner != NULL ? self->owner : self;
+}
+
+/* The tree this one draws: the main tree, or its floating window's. */
+static MlnNode *
+root_of (MlnPanes *self)
+{
+  return self->owner != NULL ? mln_model_float_root (self->model, self->float_id)
+                             : mln_model_tree (self->model);
+}
+
+static MlnNode *
+first_here (MlnPanes *self)
+{
+  MlnNode *root = root_of (self);
+
+  while (root != NULL && !mln_node_is_leaf (root))
+    root = mln_node_kid (root, 0);
+
+  return root;
+}
+
+/* A leaf to go to when the one that was is not: the first of this one's
+   tree, or of the main tree when this was a floating window that has
+   gone. */
+static MlnNode *
+somewhere (MlnPanes *self)
+{
+  MlnNode *leaf = first_here (self);
+
+  return leaf != NULL ? leaf : mln_model_first_leaf (self->model);
+}
+
+/* The MlnPanes a widget is drawn in -- a tab can be in any of them -- or
+   `fallback' for one that is in none. */
+static MlnPanes *
+panes_here (GtkWidget *w, gpointer fallback)
+{
+  GtkWidget *at = w != NULL ? gtk_widget_get_ancestor (w, MLN_TYPE_PANES) : NULL;
+
+  return at != NULL ? MLN_PANES (at) : fallback;
+}
+
+/* The MlnPanes a tab's handler is about: the one the tab is in now. */
+static MlnPanes *
+tab_panes (gpointer pane, gpointer controller)
+{
+  return panes_here (((Pane *) pane)->tab,
+                     g_object_get_data (G_OBJECT (controller), "mln-panes"));
+}
+
+/* The MlnPanes that draws a leaf: the main one, or a floating window's.
+   The main one for none. */
+static MlnPanes *
+drawer_of (MlnPanes *self, MlnNode *leaf)
+{
+  guint id;
+
+  self = main_of (self);
+  id = leaf != NULL ? mln_model_float_of (self->model, leaf) : 0;
+
+  for (guint i = 0; id != 0 && i < self->floats->len; i++)
+    {
+      FloatWin *fw = self->floats->pdata[i];
+
+      if (fw->id == id && fw->win != NULL)
+        return fw->panes;
+    }
+
+  return self;
+}
+
 /* ---- the model's hooks ---- */
 
 static gboolean
@@ -419,7 +517,7 @@ hook_changed (const char *mode, gpointer data)
 static void
 on_tab_pressed (GtkGestureClick *click, int n, double x, double y, gpointer data)
 {
-  MlnPanes *self = g_object_get_data (G_OBJECT (click), "mln-panes");
+  MlnPanes *self = tab_panes (data, click);
   Pane *p = data;
   MlnNode *leaf = mln_model_leaf_with (self->model, p->id);
   GPtrArray *live;
@@ -449,7 +547,7 @@ static void focus_front (MlnPanes *self, MlnNode *leaf);
 static void
 on_tab_shut (GtkButton *button, gpointer data)
 {
-  MlnPanes *self = g_object_get_data (G_OBJECT (button), "mln-panes");
+  MlnPanes *self = tab_panes (data, button);
   Pane *p = data;
   MlnNode *leaf = mln_model_leaf_with (self->model, p->id);
 
@@ -475,7 +573,7 @@ on_tab_shut (GtkButton *button, gpointer data)
       gtk_widget_grab_focus (back);
     else
       focus_front (self, leaf != NULL && mln_model_holds (self->model, leaf)
-                         ? leaf : mln_model_first_leaf (self->model));
+                         ? leaf : somewhere (self));
   }
 
   g_free (id);
@@ -484,7 +582,7 @@ on_tab_shut (GtkButton *button, gpointer data)
 static void
 on_tab_menu_click (GtkGestureClick *click, int n, double x, double y, gpointer data)
 {
-  MlnPanes *self = g_object_get_data (G_OBJECT (click), "mln-panes");
+  MlnPanes *self = tab_panes (data, click);
   Pane *p = data;
   graphene_point_t at;
 
@@ -903,10 +1001,12 @@ fill_drawer (MlnPanes *self)
 
 /* ---- render ---- */
 
+/* Drawn, as the zoom has it: a zoom is the main tree's, and a floating
+   window draws all of its tree. */
 static gboolean
 is_visible_leaf (MlnPanes *self, MlnNode *leaf)
 {
-  MlnNode *zoom = mln_model_get_zoom (self->model);
+  MlnNode *zoom = self->owner == NULL ? mln_model_get_zoom (self->model) : NULL;
 
   return zoom == NULL || zoom == leaf;
 }
@@ -996,21 +1096,19 @@ sync_node (MlnPanes *self, MlnNode *node, GHashTable *drawn, GHashTable *front)
   }
 }
 
+/* One MlnPanes' strips and dividers for the tree it draws, and those it
+   no longer draws taken away; the panes in front of somebody into
+   `front'. */
 static void
-sync_children (MlnPanes *self)
+sync_one (MlnPanes *self, GHashTable *front)
 {
   GHashTable *drawn = g_hash_table_new (NULL, NULL);
-  GHashTable *front = g_hash_table_new (NULL, NULL);
-  MlnNode *tree = mln_model_tree (self->model);
-  gboolean some;
-  MlnNode *zoom;
-
-  mln_model_settle (self->model);
-  zoom = mln_model_get_zoom (self->model);
-  some = tree != NULL && mln_model_alive (self->model, tree);
+  MlnNode *root = root_of (self);
+  MlnNode *zoom = self->owner == NULL ? mln_model_get_zoom (self->model) : NULL;
+  gboolean some = root != NULL && mln_model_alive (self->model, root);
 
   if (some)
-    sync_node (self, tree, drawn, front);
+    sync_node (self, root, drawn, front);
 
   /* Strips and dividers the tree no longer draws. */
   for (guint i = self->strips->len; i-- > 0; )
@@ -1020,20 +1118,6 @@ sync_children (MlnPanes *self)
   for (guint i = self->dividers->len; i-- > 0; )
     if (!g_hash_table_contains (drawn, self->dividers->pdata[i]))
       g_ptr_array_remove_index (self->dividers, i);
-
-  /* A tab whose pane is not drawn goes nowhere. */
-  for (guint i = 0; i < self->order->len; i++)
-    {
-      Pane *p = self->order->pdata[i];
-      MlnNode *leaf = mln_model_leaf_with (self->model, p->id);
-      gboolean drawn_tab = leaf != NULL && mln_model_playable (self->model, p->id) &&
-                           strip_for (self, leaf) != NULL;
-
-      if (!drawn_tab && gtk_widget_get_parent (p->tab) != NULL)
-        gtk_box_remove (GTK_BOX (gtk_widget_get_parent (p->tab)), p->tab);
-
-      gtk_widget_set_child_visible (p->host, g_hash_table_contains (front, p));
-    }
 
   for (guint i = 0; i < self->strips->len; i++)
     {
@@ -1045,8 +1129,102 @@ sync_children (MlnPanes *self)
   for (guint i = 0; i < self->dividers->len; i++)
     gtk_widget_set_child_visible (((Divider *) self->dividers->pdata[i])->bar, zoom == NULL);
 
-  gtk_widget_set_child_visible (self->blank, !some);
-  fill_drawer (self);
+  if (self->owner == NULL)
+    {
+      gtk_widget_set_child_visible (self->blank, !some);
+      fill_drawer (self);
+    }
+
+  g_hash_table_unref (drawn);
+  gtk_widget_queue_resize (GTK_WIDGET (self));
+}
+
+static void float_open (MlnPanes *self, guint id);
+static void float_title (FloatWin *fw);
+static void float_close (MlnPanes *self, FloatWin *fw);
+
+/* A widget moved to another MlnPanes, held across the move. */
+static void
+move_to (GtkWidget *w, MlnPanes *to)
+{
+  if (gtk_widget_get_parent (w) == GTK_WIDGET (to))
+    return;
+
+  g_object_ref (w);
+
+  if (gtk_widget_get_parent (w) != NULL)
+    gtk_widget_unparent (w);
+
+  gtk_widget_set_parent (w, GTK_WIDGET (to));
+  g_object_unref (w);
+}
+
+static void
+sync_children (MlnPanes *self)
+{
+  GHashTable *front = g_hash_table_new (NULL, NULL);
+  GArray *ids;
+
+  mln_model_settle (self->model);
+
+  /* A window for each floating tree the model has, made if it is new --
+     once this one is on screen, so that a window made for a layout loaded
+     before then is made for the window it belongs with, and after it. */
+  ids = mln_model_floats (self->model);
+
+  for (guint i = 0; gtk_widget_get_mapped (GTK_WIDGET (self)) && i < ids->len; i++)
+    {
+      guint id = g_array_index (ids, guint, i);
+      gboolean have = FALSE;
+
+      for (guint k = 0; k < self->floats->len && !have; k++)
+        have = ((FloatWin *) self->floats->pdata[k])->id == id;
+
+      if (!have)
+        float_open (self, id);
+    }
+
+  sync_one (self, front);
+
+  for (guint k = 0; k < self->floats->len; k++)
+    {
+      FloatWin *fw = self->floats->pdata[k];
+
+      if (fw->win != NULL && mln_model_float_root (self->model, fw->id) != NULL)
+        sync_one (fw->panes, front);
+    }
+
+  /* Each pane in the MlnPanes that draws its leaf -- the main one, for
+     one in no leaf -- shown if it is in front; and a tab whose pane is
+     not drawn goes nowhere. */
+  for (guint i = 0; i < self->order->len; i++)
+    {
+      Pane *p = self->order->pdata[i];
+      MlnNode *leaf = mln_model_leaf_with (self->model, p->id);
+      MlnPanes *where = drawer_of (self, leaf);
+      gboolean drawn_tab = leaf != NULL && mln_model_playable (self->model, p->id) &&
+                           strip_for (where, leaf) != NULL;
+
+      if (!drawn_tab && gtk_widget_get_parent (p->tab) != NULL)
+        gtk_box_remove (GTK_BOX (gtk_widget_get_parent (p->tab)), p->tab);
+
+      move_to (p->host, where);
+      gtk_widget_set_child_visible (p->host, g_hash_table_contains (front, p));
+    }
+
+  /* The windows the model no longer has, with nothing of the panes' left
+     in them now. */
+  for (guint k = self->floats->len; k-- > 0; )
+    {
+      FloatWin *fw = self->floats->pdata[k];
+
+      if (mln_model_float_root (self->model, fw->id) == NULL)
+        float_close (self, fw);
+      else
+        float_title (fw);
+    }
+
+  g_array_unref (ids);
 
   /* Which panes are in front of somebody, told only where it changed --
      and told once everything here is settled, from a list of its own:
@@ -1058,8 +1236,9 @@ sync_children (MlnPanes *self)
     for (guint i = 0; i < self->order->len; i++)
       {
         Pane *p = self->order->pdata[i];
+        GtkWidget *in = gtk_widget_get_parent (p->host);
         gboolean now = g_hash_table_contains (front, p) &&
-                       gtk_widget_get_mapped (GTK_WIDGET (self));
+                       in != NULL && gtk_widget_get_mapped (in);
 
         if (now != p->shown)
           {
@@ -1072,9 +1251,7 @@ sync_children (MlnPanes *self)
           gtk_widget_remove_css_class (p->tab, "attention");
       }
 
-    g_hash_table_unref (drawn);
     g_hash_table_unref (front);
-    gtk_widget_queue_resize (GTK_WIDGET (self));
 
     g_object_ref (self);
 
@@ -1090,13 +1267,176 @@ sync_children (MlnPanes *self)
   }
 }
 
+/* Every tree drawn again, whichever MlnPanes is asked: the main one
+   draws its own and its windows'. */
 static void
 render (MlnPanes *self)
 {
+  self = main_of (self);
+
   if (mln_model_loaded (self->model))
     sync_children (self);
 }
 
+
+/* ---- floating windows ---- */
+
+static gboolean
+on_float_close (GtkWindow *win, gpointer data)
+{
+  MlnPanes *self = data;
+
+  /* The panes go back into the main tree, and the render that follows
+     closes the window, now that the model has no tree for it. */
+  for (guint k = 0; k < self->floats->len; k++)
+    {
+      FloatWin *fw = self->floats->pdata[k];
+
+      if (fw->win == win)
+        {
+          mln_model_dock (self->model, fw->id);
+          render (self);
+          break;
+        }
+    }
+
+  return TRUE;
+}
+
+/* A window gone some other way than float_close -- the app closing its
+   windows as it quits, the one it is transient for destroyed with it: the
+   panes' hosts are out of it already (see dispose), and the model keeps
+   the window, which comes back when the layout is next loaded. */
+static void
+on_float_destroyed (GtkWidget *win, gpointer data)
+{
+  MlnPanes *self = data;
+
+  for (guint k = 0; k < self->floats->len; k++)
+    {
+      FloatWin *fw = self->floats->pdata[k];
+
+      if (GTK_WIDGET (fw->win) == win)
+        {
+          fw->destroy_handler = 0;
+          g_clear_object (&fw->win);
+        }
+    }
+}
+
+static void
+float_open (MlnPanes *self, guint id)
+{
+  FloatWin *fw = g_new0 (FloatWin, 1);
+  MlnPanes *inst = g_object_new (MLN_TYPE_PANES, NULL);
+  GtkRoot *root = gtk_widget_get_root (GTK_WIDGET (self));
+  int w = 0, h = 0;
+
+  /* The main one's model and panes, not its own. */
+  mln_model_free (inst->model);
+  g_hash_table_unref (inst->panes);
+  g_ptr_array_free (inst->order, TRUE);
+  inst->model = self->model;
+  inst->panes = self->panes;
+  inst->order = self->order;
+  inst->owner = self;
+  inst->float_id = id;
+  inst->show_drawer = FALSE;
+  inst->split = self->split;
+  inst->least = self->least;
+  inst->edge = self->edge;
+
+  fw->id = id;
+  fw->panes = inst;
+
+  if (self->window_func != NULL)
+    fw->win = self->window_func (self, self->window_data);
+
+  if (fw->win == NULL)
+    {
+      fw->win = GTK_WINDOW (gtk_window_new ());
+
+      if (GTK_IS_WINDOW (root))
+        {
+          gtk_window_set_transient_for (fw->win, GTK_WINDOW (root));
+          gtk_window_set_destroy_with_parent (fw->win, TRUE);
+          gtk_window_set_application (fw->win, gtk_window_get_application (GTK_WINDOW (root)));
+        }
+    }
+
+  g_object_ref (fw->win);
+
+  if (!mln_model_float_size (self->model, id, &w, &h) || w <= 0 || h <= 0)
+    {
+      w = 480;
+      h = 360;
+    }
+
+  gtk_window_set_default_size (fw->win, w, h);
+  gtk_window_set_child (fw->win, GTK_WIDGET (inst));
+  g_signal_connect (fw->win, "close-request", G_CALLBACK (on_float_close), self);
+  fw->destroy_handler = g_signal_connect (fw->win, "destroy",
+                                          G_CALLBACK (on_float_destroyed), self);
+  g_ptr_array_add (self->floats, fw);
+  float_title (fw);
+  gtk_window_present (fw->win);
+}
+
+/* Titled by the pane in front of its first leaf, as a window of one
+   pane is by that pane. */
+static void
+float_title (FloatWin *fw)
+{
+  MlnNode *leaf = fw->win != NULL ? first_here (fw->panes) : NULL;
+  GPtrArray *live;
+
+  if (leaf == NULL)
+    return;
+
+  live = mln_model_live_tabs (fw->panes->model, leaf);
+
+  if (mln_node_active (leaf) < live->len)
+    {
+      Pane *p = pane_of (fw->panes, live->pdata[mln_node_active (leaf)]);
+
+      if (p != NULL && g_strcmp0 (gtk_window_get_title (fw->win), p->title) != 0)
+        gtk_window_set_title (fw->win, p->title);
+    }
+
+  g_ptr_array_unref (live);
+}
+
+static void
+float_close (MlnPanes *self, FloatWin *fw)
+{
+  g_ptr_array_remove (self->floats, fw);
+
+  if (fw->win != NULL)
+    {
+      g_clear_signal_handler (&fw->destroy_handler, fw->win);
+      g_signal_handlers_disconnect_by_data (fw->win, self);
+      gtk_window_destroy (fw->win);
+      g_clear_object (&fw->win);
+    }
+
+  g_free (fw);
+}
+
+/* The floating window a pane is in, or NULL. */
+static FloatWin *
+float_with (MlnPanes *self, const char *id)
+{
+  guint fid;
+
+  self = main_of (self);
+  fid = mln_model_float_of (self->model, mln_model_leaf_with (self->model, id));
+
+  for (guint k = 0; fid != 0 && k < self->floats->len; k++)
+    if (((FloatWin *) self->floats->pdata[k])->id == fid)
+      return self->floats->pdata[k];
+
+  return NULL;
+}
 
 /* ---- dragging a tab ---- */
 
@@ -1292,7 +1632,7 @@ end_drag (MlnPanes *self)
 static void
 on_tab_drag_begin (GtkGestureDrag *g, double x, double y, gpointer data)
 {
-  MlnPanes *self = g_object_get_data (G_OBJECT (g), "mln-panes");
+  MlnPanes *self = tab_panes (data, g);
   Pane *p = data;
 
   g_free (self->drag_id);
@@ -1303,7 +1643,7 @@ on_tab_drag_begin (GtkGestureDrag *g, double x, double y, gpointer data)
 static void
 on_tab_drag_update (GtkGestureDrag *g, double ox, double oy, gpointer data)
 {
-  MlnPanes *self = g_object_get_data (G_OBJECT (g), "mln-panes");
+  MlnPanes *self = tab_panes (data, g);
   Pane *p = data;
   graphene_point_t at;
   double sx, sy;
@@ -1402,7 +1742,7 @@ land (gpointer data)
 static void
 on_tab_drag_end (GtkGestureDrag *g, double ox, double oy, gpointer data)
 {
-  MlnPanes *self = g_object_get_data (G_OBJECT (g), "mln-panes");
+  MlnPanes *self = tab_panes (data, g);
   Landing *l;
 
   if (!self->dragging || self->drop.kind == DROP_NONE)
@@ -1450,7 +1790,7 @@ static gboolean
 on_tab_key (GtkEventControllerKey *keys, guint keyval, guint code,
             GdkModifierType state, gpointer data)
 {
-  MlnPanes *self = g_object_get_data (G_OBJECT (keys), "mln-panes");
+  MlnPanes *self = tab_panes (data, keys);
   Pane *p = data;
   MlnNode *leaf = mln_model_leaf_with (self->model, p->id);
   GPtrArray *live;
@@ -1537,7 +1877,7 @@ current (MlnPanes *self)
   if (focus != NULL && strip_for (self, focus) != NULL)
     return focus;
 
-  return mln_model_first_leaf (self->model);
+  return somewhere (self);
 }
 
 /* The leaf that way: of the ones whose middle lies in the direction the
@@ -1745,7 +2085,7 @@ on_key (GtkEventControllerKey *keys, guint keyval, guint code,
       g_free (moving);
       g_ptr_array_unref (closed);
     }
-  else if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter)
+  else if ((keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) && self->owner == NULL)
     {
       mln_model_set_zoom (self->model, mln_model_get_zoom (self->model) == NULL ? leaf : NULL);
       render (self);
@@ -1756,13 +2096,13 @@ on_key (GtkEventControllerKey *keys, guint keyval, guint code,
       /* Onto a leaf still in the tree: this one if it kept anything. */
       if (mln_model_close (self->model, id))
         done (self, mln_model_holds (self->model, leaf) ? leaf
-                                                       : mln_model_first_leaf (self->model));
+                                                       : somewhere (self));
     }
   else if (chord_is (keys, keyval, code, GDK_KEY_0))
     {
       mln_model_reset (self->model);
       render (self);
-      focus_front (self, mln_model_first_leaf (self->model));
+      focus_front (self, somewhere (self));
     }
   else
     used = FALSE;
@@ -1783,6 +2123,50 @@ on_key (GtkEventControllerKey *keys, guint keyval, guint code,
  * changes with every move.
  */
 
+/* A pane into a window of its own, as big as its leaf is here, and that
+   window in front with the pane's tab focused. */
+static void
+undock (MlnPanes *self, const char *id)
+{
+  MlnNode *leaf = mln_model_leaf_with (self->model, id);
+  Strip *s = leaf != NULL ? strip_for (self, leaf) : NULL;
+  Pane *p = pane_of (self, id);
+  FloatWin *fw;
+
+  if (p == NULL || mln_model_undock (self->model, id, s != NULL ? s->box.w : 0,
+                                     s != NULL ? s->box.h : 0) == 0)
+    return;
+
+  render (self);
+
+  if ((fw = float_with (self, id)) != NULL && fw->win != NULL)
+    {
+      gtk_window_present (fw->win);
+      gtk_widget_grab_focus (p->tab);
+    }
+}
+
+/* A pane out of its floating window, back into the main tree where it
+   was, and the main window in front with its tab focused. */
+static void
+dock (MlnPanes *self, const char *id)
+{
+  MlnPanes *home = main_of (self);
+  Pane *p = pane_of (self, id);
+  GtkRoot *root;
+
+  if (p == NULL || float_with (self, id) == NULL)
+    return;
+
+  mln_model_dock_pane (home->model, id);
+  render (home);
+
+  if ((root = gtk_widget_get_root (GTK_WIDGET (home))) != NULL && GTK_IS_WINDOW (root))
+    gtk_window_present (GTK_WINDOW (root));
+
+  gtk_widget_grab_focus (p->tab);
+}
+
 static void
 act_on_pane (GtkWidget *w, const char *name, GVariant *param)
 {
@@ -1795,7 +2179,7 @@ act_on_pane (GtkWidget *w, const char *name, GVariant *param)
     {
       if (mln_model_close (self->model, mine))
         done (self, leaf != NULL && mln_model_holds (self->model, leaf)
-                    ? leaf : mln_model_first_leaf (self->model));
+                    ? leaf : somewhere (self));
     }
   else if (leaf != NULL && (strcmp (name, "panes.split-right") == 0 ||
                             strcmp (name, "panes.split-down") == 0))
@@ -1805,12 +2189,16 @@ act_on_pane (GtkWidget *w, const char *name, GVariant *param)
                              TRUE);
       done (self, mln_model_leaf_with (self->model, mine));
     }
-  else if (leaf != NULL && strcmp (name, "panes.zoom") == 0)
+  else if (leaf != NULL && strcmp (name, "panes.zoom") == 0 && self->owner == NULL)
     {
       mln_model_set_zoom (self->model, mln_model_get_zoom (self->model) == leaf ? NULL : leaf);
       render (self);
       focus_front (self, leaf);
     }
+  else if (strcmp (name, "panes.undock") == 0)
+    undock (self, mine);
+  else if (strcmp (name, "panes.dock") == 0)
+    dock (self, mine);
 
   g_free (mine);
 }
@@ -1867,7 +2255,17 @@ open_menu (MlnPanes *self, const char *id, double x, double y)
         ITEM ("Split _Down", "panes.split-down");
     }
 
-  ITEM (mln_model_get_zoom (self->model) == leaf ? "_Unzoom" : "_Zoom", "panes.zoom");
+  /* A zoom is the main window's; a floating window is as big as it is. */
+  if (self->owner == NULL)
+    ITEM (mln_model_get_zoom (self->model) == leaf ? "_Unzoom" : "_Zoom", "panes.zoom");
+
+  /* Out into a window of its own, unless it is alone in one already; and
+     back, from one. */
+  if (self->owner == NULL || live->len > 1 || mln_node_n_kids (root_of (self)) > 0)
+    ITEM ("Move to _New Window", "panes.undock");
+
+  if (self->owner != NULL)
+    ITEM ("Move to _Main Window", "panes.dock");
 
   if (mln_model_closable (self->model, id))
     ITEM ("_Close", "panes.close");
@@ -2153,7 +2551,7 @@ mln_panes_measure (GtkWidget *w, GtkOrientation o, int for_size,
                    int *min, int *nat, int *min_base, int *nat_base)
 {
   MlnPanes *self = MLN_PANES (w);
-  MlnNode *tree = mln_model_tree (self->model);
+  MlnNode *tree = root_of (self);
   gboolean row = o == GTK_ORIENTATION_HORIZONTAL;
   double least = 0;
 
@@ -2172,9 +2570,14 @@ static void
 mln_panes_size_allocate (GtkWidget *w, int width, int height, int baseline)
 {
   MlnPanes *self = MLN_PANES (w);
-  MlnNode *tree = mln_model_tree (self->model);
-  MlnNode *zoom = mln_model_get_zoom (self->model);
+  MlnNode *tree = root_of (self);
+  MlnNode *zoom = self->owner == NULL ? mln_model_get_zoom (self->model) : NULL;
   int top = drawer_height (self);
+
+  /* A floating window's size, kept with the layout for the next time it
+     is opened. */
+  if (self->owner != NULL && width > 0 && height > 0)
+    mln_model_set_float_size (self->model, self->float_id, width, height);
   Box box = { 0, top, width, height - top };
 
   if (gtk_widget_get_child_visible (self->drawer))
@@ -2212,6 +2615,63 @@ mln_panes_dispose (GObject *o)
   MlnPanes *self = MLN_PANES (o);
 
   g_clear_handle_id (&self->render_idle, g_source_remove);
+
+  /* A floating window's: the panes' hosts back to the main one, hidden,
+     and nothing of theirs let go -- they are the main one's. */
+  if (self->owner != NULL)
+    {
+      g_clear_pointer (&self->menu, gtk_widget_unparent);
+      g_clear_pointer (&self->strips, g_ptr_array_unref);
+      g_clear_pointer (&self->dividers, g_ptr_array_unref);
+
+      for (guint i = 0; self->order != NULL && i < self->order->len; i++)
+        {
+          Pane *p = self->order->pdata[i];
+
+          if (p->host != NULL && gtk_widget_get_parent (p->host) == GTK_WIDGET (self))
+            {
+              move_to (p->host, self->owner);
+              gtk_widget_set_child_visible (p->host, FALSE);
+            }
+        }
+
+      g_clear_pointer (&self->drawer, gtk_widget_unparent);
+      g_clear_pointer (&self->blank, gtk_widget_unparent);
+      g_clear_pointer (&self->hint, gtk_widget_unparent);
+      g_clear_pointer (&self->menu_id, g_free);
+      g_clear_pointer (&self->drag_id, g_free);
+      drop_clear (&self->drop);
+      self->order = NULL;
+      self->panes = NULL;
+      self->model = NULL;
+
+      G_OBJECT_CLASS (mln_panes_parent_class)->dispose (o);
+      return;
+    }
+
+  /* The floating windows, with the panes' hosts brought home first:
+     destroying a window destroys what is in it. */
+  while (self->floats != NULL && self->floats->len > 0)
+    {
+      FloatWin *fw = self->floats->pdata[self->floats->len - 1];
+
+      for (guint i = 0; self->order != NULL && i < self->order->len; i++)
+        {
+          Pane *p = self->order->pdata[i];
+
+          if (p->host != NULL && fw->win != NULL &&
+              gtk_widget_get_parent (p->host) == GTK_WIDGET (fw->panes))
+            move_to (p->host, self);
+        }
+
+      float_close (self, fw);
+    }
+
+  if (self->window_destroy != NULL)
+    self->window_destroy (self->window_data);
+
+  self->window_destroy = NULL;
+  self->window_func = NULL;
 
   /* The menu first: it is a child of this widget and can name a pane. */
   g_clear_pointer (&self->menu, gtk_widget_unparent);
@@ -2261,9 +2721,17 @@ mln_panes_finalize (GObject *o)
 {
   MlnPanes *self = MLN_PANES (o);
 
-  mln_model_free (self->model);
-  g_hash_table_unref (self->panes);
-  g_ptr_array_free (self->order, TRUE);
+  /* A floating window's MlnPanes let go of the main one's in dispose. */
+  if (self->model != NULL)
+    mln_model_free (self->model);
+
+  if (self->panes != NULL)
+    g_hash_table_unref (self->panes);
+
+  if (self->order != NULL)
+    g_ptr_array_free (self->order, TRUE);
+
+  g_ptr_array_free (self->floats, TRUE);
 
   G_OBJECT_CLASS (mln_panes_parent_class)->finalize (o);
 }
@@ -2338,15 +2806,16 @@ mln_panes_unmap (GtkWidget *w)
 
   GTK_WIDGET_CLASS (mln_panes_parent_class)->unmap (w);
 
-  /* Out of sight altogether: every pane that was shown is told. */
-  for (guint i = 0; i < self->order->len; i++)
+  /* Out of sight altogether: every pane shown here is told -- by the main
+     one, which the signals are on. */
+  for (guint i = 0; self->order != NULL && i < self->order->len; i++)
     {
       Pane *p = self->order->pdata[i];
 
-      if (p->shown)
+      if (p->shown && gtk_widget_get_parent (p->host) == w)
         {
           p->shown = FALSE;
-          g_signal_emit (self, signals[PANE_SHOWN], 0, p->id, FALSE);
+          g_signal_emit (main_of (self), signals[PANE_SHOWN], 0, p->id, FALSE);
         }
     }
 }
@@ -2403,6 +2872,8 @@ mln_panes_class_init (MlnPanesClass *klass)
   gtk_widget_class_install_action (wc, "panes.split-right", "s", act_on_pane);
   gtk_widget_class_install_action (wc, "panes.split-down", "s", act_on_pane);
   gtk_widget_class_install_action (wc, "panes.zoom", "s", act_on_pane);
+  gtk_widget_class_install_action (wc, "panes.undock", "s", act_on_pane);
+  gtk_widget_class_install_action (wc, "panes.dock", "s", act_on_pane);
   gtk_widget_class_install_action (wc, "panes.reset", NULL, act_reset);
 }
 
@@ -2416,6 +2887,7 @@ mln_panes_init (MlnPanes *self)
   self->order = g_ptr_array_new_with_free_func ((GDestroyNotify) pane_free);
   self->strips = g_ptr_array_new_with_free_func ((GDestroyNotify) strip_free);
   self->dividers = g_ptr_array_new_with_free_func ((GDestroyNotify) divider_free);
+  self->floats = g_ptr_array_new ();
   self->split = 6;
   self->least = 64;
   self->edge = 0.2;
@@ -2685,6 +3157,14 @@ mln_panes_present (MlnPanes *self, const char *id, gboolean focus)
 
   render (self);
 
+  /* In a floating window: that window, in front. */
+  {
+    FloatWin *fw = float_with (self, id);
+
+    if (fw != NULL && fw->win != NULL && focus)
+      gtk_window_present (fw->win);
+  }
+
   if (focus)
     gtk_widget_grab_focus (p->tab);
 }
@@ -2711,14 +3191,14 @@ mln_panes_get_tab_bounds (MlnPanes *self, const char *id, graphene_rect_t *bound
 
   return p != NULL && gtk_widget_get_parent (p->tab) != NULL &&
          gtk_widget_get_child_visible (gtk_widget_get_parent (p->tab)) &&
-         gtk_widget_compute_bounds (p->tab, GTK_WIDGET (self), bounds);
+         gtk_widget_compute_bounds (p->tab, GTK_WIDGET (panes_here (p->tab, self)), bounds);
 }
 
 gboolean
 mln_panes_get_leaf_bounds (MlnPanes *self, const char *id, graphene_rect_t *bounds)
 {
   MlnNode *leaf = mln_model_leaf_with (self->model, id);
-  Strip *s = leaf != NULL ? strip_for (self, leaf) : NULL;
+  Strip *s = leaf != NULL ? strip_for (drawer_of (self, leaf), leaf) : NULL;
 
   if (s == NULL || !gtk_widget_get_child_visible (s->strip))
     return FALSE;
@@ -2809,4 +3289,46 @@ mln_panes_reset (MlnPanes *self)
 {
   mln_model_reset (self->model);
   render (self);
+}
+
+void
+mln_panes_set_window_func (MlnPanes *self, MlnWindowFunc func, gpointer data,
+                           GDestroyNotify destroy)
+{
+  g_return_if_fail (MLN_IS_PANES (self));
+
+  if (self->window_destroy != NULL)
+    self->window_destroy (self->window_data);
+
+  self->window_func = func;
+  self->window_data = data;
+  self->window_destroy = destroy;
+}
+
+void
+mln_panes_undock (MlnPanes *self, const char *id)
+{
+  g_return_if_fail (MLN_IS_PANES (self));
+
+  undock (drawer_of (self, mln_model_leaf_with (self->model, id)), id);
+}
+
+void
+mln_panes_dock (MlnPanes *self, const char *id)
+{
+  g_return_if_fail (MLN_IS_PANES (self));
+
+  dock (self, id);
+}
+
+GtkWindow *
+mln_panes_get_window (MlnPanes *self, const char *id)
+{
+  FloatWin *fw;
+
+  g_return_val_if_fail (MLN_IS_PANES (self), NULL);
+
+  fw = float_with (self, id);
+
+  return fw != NULL ? fw->win : NULL;
 }
