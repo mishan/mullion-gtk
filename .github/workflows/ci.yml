@@ -5,18 +5,34 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # shotbox, for the widget suite, at a known commit: its changes should
+  # not be what breaks this CI.
+  SHOTBOX_REF: 99162f1a9972df83c4b7cd0bca86480b3bdc8d95
+
 jobs:
   meson:
-    # Ubuntu 24.04's GTK is 4.14, the oldest this is built against in CI;
-    # the floor is 4.10.
+    # Ubuntu 24.04's GTK is 4.14; the floor is 4.10, which `floor' holds
+    # the code to.
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        display: [x11, wayland]
     steps:
       - uses: actions/checkout@v4
 
-      # shotbox, for the widget suite: a private X display and XTEST.
       - uses: actions/checkout@v4
         with:
           repository: mishan/shotbox
+          ref: ${{ env.SHOTBOX_REF }}
           path: shotbox
 
       - name: Install dependencies
@@ -24,7 +40,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             meson ninja-build gcc pkg-config libgtk-4-dev python3 \
-            xvfb xauth dbus-daemon imagemagick x11-utils fonts-dejavu-core
+            xvfb xauth dbus-daemon imagemagick x11-utils fonts-dejavu-core \
+            ${{ matrix.display == 'wayland' && 'sway grim xwayland' || '' }}
 
       - name: Build
         run: |
@@ -33,15 +50,46 @@ jobs:
           ninja -C build
 
       - name: Test
+        env:
+          MLN_WAYLAND: ${{ matrix.display == 'wayland' && '1' || '' }}
         run: meson test -C build --print-errorlogs
 
       - name: Keep the widget suite's pictures and logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: widget-logs
+          name: widget-logs-${{ matrix.display }}
           path: build/widget-logs
           if-no-files-found: ignore
+
+  floor:
+    # Nothing newer than GTK 4.10 and GLib 2.74 used, shared, and as a
+    # subproject of a meson project that builds shared.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build gcc pkg-config libgtk-4-dev
+
+      - name: Build against the 4.10 and 2.74 API, shared
+        run: |
+          meson setup build -Ddefault_library=shared -Dwerror=true \
+            -Dc_args="-DGDK_VERSION_MIN_REQUIRED=GDK_VERSION_4_10 -DGDK_VERSION_MAX_ALLOWED=GDK_VERSION_4_10 -DGLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_74 -DGLIB_VERSION_MAX_ALLOWED=GLIB_VERSION_2_74"
+          ninja -C build
+          meson test -C build --no-suite widget --print-errorlogs
+          test "$(nm -D --defined-only build/src/libmullion-gtk-0.so | grep -c ' T ')" -le 40
+
+      - name: As a subproject
+        run: |
+          ln -s "$GITHUB_WORKSPACE" tests/consumer/subprojects/mullion-gtk
+          meson setup consumer tests/consumer --prefix "$RUNNER_TEMP/consumer"
+          ninja -C consumer install
+          ! find "$RUNNER_TEMP/consumer" -name '*mullion*' | grep .
+          ! find consumer -name 'libmullion-gtk-0.so*' | grep .
 
   cmake:
     runs-on: ubuntu-24.04
@@ -57,7 +105,7 @@ jobs:
       # The unit suites; the widget suite skips itself without shotbox.
       - name: Build and test
         run: |
-          cmake -S . -B build -G Ninja
+          cmake -S . -B build -G Ninja -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
           cmake --build build
           ctest --test-dir build --output-on-failure
 
@@ -65,4 +113,10 @@ jobs:
         run: |
           cmake --install build --prefix "$RUNNER_TEMP/prefix"
           export PKG_CONFIG_PATH="$(dirname "$(find "$RUNNER_TEMP/prefix" -name mullion-gtk-0.pc)")"
-          cc demo/demo.c $(pkg-config --cflags --libs mullion-gtk-0) -o demo-outside
+          cc demo/demo.c $(pkg-config --cflags --libs --static mullion-gtk-0) -o demo-outside
+
+      - name: Shared
+        run: |
+          cmake -S . -B build-shared -G Ninja -DMLN_SHARED=ON -DMLN_TESTS=OFF
+          cmake --build build-shared
+          test "$(nm -D --defined-only build-shared/libmullion-gtk-0.so | grep -c ' T ')" -le 40

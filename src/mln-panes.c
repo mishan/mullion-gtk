@@ -244,7 +244,7 @@ add_style (GdkDisplay *display)
 
   css = gtk_css_provider_new ();
   g_signal_connect (css, "parsing-error", G_CALLBACK (style_error), NULL);
-#if GTK_CHECK_VERSION (4, 12, 0)
+#if GDK_VERSION_MAX_ALLOWED >= GDK_VERSION_4_12
   gtk_css_provider_load_from_string (css, STYLE);
 #else
   gtk_css_provider_load_from_data (css, STYLE, -1);

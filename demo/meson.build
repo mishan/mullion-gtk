@@ -1,1 +1,1 @@
-demo = executable('mullion-demo', 'demo.c', dependencies: [panes_dep, model_dep])
+demo = executable('mullion-demo', 'demo.c', dependencies: panes_dep)
