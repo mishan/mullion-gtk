@@ -6,13 +6,18 @@ foreach t : ['json', 'layouts', 'model']
 endforeach
 
 # MlnPanes in a real window, driven with shotbox (github.com/mishan/shotbox)
-# on a private X display. Skipped when shotbox cannot be imported.
+# on a private X display: the installed one, or a checkout given with
+# -Dshotbox. Skipped without either.
 python = find_program('python3', required: false)
 
 if python.found()
+  widget_env = environment()
+  if get_option('shotbox') != ''
+    widget_env.prepend('PYTHONPATH', get_option('shotbox'))
+  endif
   test('widget', python,
        args: [files('widget.py'), demo],
-       env: ['PYTHONPATH=' + get_option('shotbox')],
+       env: widget_env,
        timeout: 900,
        is_parallel: false)
 endif

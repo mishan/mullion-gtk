@@ -12,20 +12,42 @@ Every scenario starts the demo in a sealed shotbox session (a private X
 display, nothing on the desktop) and reads back what it prints: the
 layout it keeps, which panes are shown, and where every tab and leaf is,
 so no position here depends on the fonts. Exits 77 (skipped) when shotbox
-cannot be imported.
+is not installed and not on PYTHONPATH.
 """
 
 import json
 import os
+import shutil
 import sys
 import time
+
+
+def shotbox_python():
+    """The Python the installed shotbox command runs under (its #! line):
+    pipx installs shotbox into a venv of its own, which this Python cannot
+    import it from."""
+    cmd = shutil.which("shotbox")
+    if not cmd:
+        return None
+    with open(cmd, "rb") as f:
+        line = os.fsdecode(f.readline())
+    words = line[2:].split() if line.startswith("#!") else []
+    if words and os.path.isabs(words[0]) and os.path.basename(words[0]).startswith("python"):
+        return words[0]
+    return None
+
 
 try:
     import shotbox
     from shotbox import xtest
 except ImportError:
-    print("skip: shotbox is not importable (PYTHONPATH)")
-    sys.exit(77)
+    # Once, under that Python; skipped when it cannot import it either.
+    python = None if os.environ.get("MLN_SHOTBOX_PYTHON") else shotbox_python()
+    if not python:
+        print("skip: shotbox is not installed or on PYTHONPATH")
+        sys.exit(77)
+    os.environ["MLN_SHOTBOX_PYTHON"] = python
+    os.execv(python, [python] + sys.argv)
 
 DEMO = os.path.abspath(sys.argv[1])
 

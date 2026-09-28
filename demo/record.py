@@ -7,8 +7,9 @@
 """The README's demo.gif: the demo, driven in a sealed shotbox session
 under metacity, recorded with ffmpeg.
 
-    PYTHONPATH=path/to/shotbox record.py DEMO OUT.gif
+    record.py DEMO OUT.gif
 
+with shotbox installed (pipx or pip), or a checkout of it on PYTHONPATH.
 Needs metacity, xdotool, xsetroot and ffmpeg besides what shotbox does.
 """
 
@@ -20,8 +21,30 @@ import sys
 import tempfile
 import time
 
-import shotbox
-from shotbox import xtest
+
+def shotbox_python():
+    """The Python the installed shotbox command runs under (its #! line):
+    pipx installs shotbox into a venv of its own."""
+    cmd = shutil.which("shotbox")
+    if not cmd:
+        return None
+    with open(cmd, "rb") as f:
+        line = os.fsdecode(f.readline())
+    words = line[2:].split() if line.startswith("#!") else []
+    if words and os.path.isabs(words[0]) and os.path.basename(words[0]).startswith("python"):
+        return words[0]
+    return None
+
+
+try:
+    import shotbox
+    from shotbox import xtest
+except ImportError:
+    python = None if os.environ.get("MLN_SHOTBOX_PYTHON") else shotbox_python()
+    if not python:
+        sys.exit("record.py: shotbox is not installed or on PYTHONPATH")
+    os.environ["MLN_SHOTBOX_PYTHON"] = python
+    os.execv(python, [python] + sys.argv)
 
 DEMO, OUT = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
 W = "mullion-gtk"
