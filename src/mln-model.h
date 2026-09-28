@@ -184,6 +184,11 @@ gboolean    mln_model_closable      (MlnModel *m, const char *id);
 /* The i-th tab in play of a leaf, in front. */
 void        mln_model_raise         (MlnModel *m, MlnNode *leaf, guint i);
 
+/* Reopened by a person from the drawer: where it was, or into the leaf
+   last focused. A change, and the focus is left alone. The leaf, or NULL
+   if it was not closed. */
+MlnNode    *mln_model_reopen        (MlnModel *m, const char *id);
+
 /* Raised by the app (mullion's `present'): into the leaf it was in or
    beside its old neighbor if it is closed, else `fallback'; never into
    `avoid'. The leaf it is in; NULL if it is not a pane in play. */

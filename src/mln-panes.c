@@ -809,8 +809,19 @@ static void
 on_reopen (GtkButton *button, gpointer data)
 {
   MlnPanes *self = g_object_get_data (G_OBJECT (button), "mln-panes");
+  char *id = g_strdup (data);   /* the button goes with the render */
 
-  mln_panes_present (self, data, TRUE);
+  if (mln_model_reopen (self->model, id) != NULL)
+    {
+      Pane *p = pane_of (self, id);
+
+      render (self);
+
+      if (p != NULL)
+        gtk_widget_grab_focus (p->tab);
+    }
+
+  g_free (id);
 }
 
 static void
@@ -1486,14 +1497,12 @@ on_tab_key (GtkEventControllerKey *keys, guint keyval, guint code,
   return TRUE;
 }
 
-/* The leaf a command is about: the one the focus is in, or the one last
-   pressed in, or the first there is. */
+/* The leaf the keyboard focus is in, or NULL when it is not in one. */
 static MlnNode *
-current (MlnPanes *self)
+focused_leaf (MlnPanes *self)
 {
   GtkRoot *root = gtk_widget_get_root (GTK_WIDGET (self));
   GtkWidget *at = root != NULL ? gtk_root_get_focus (root) : NULL;
-  MlnNode *focus = mln_model_get_focus (self->model);
 
   for (; at != NULL && at != GTK_WIDGET (self); at = gtk_widget_get_parent (at))
     {
@@ -1506,6 +1515,20 @@ current (MlnPanes *self)
         if (((Strip *) self->strips->pdata[i])->strip == at)
           return ((Strip *) self->strips->pdata[i])->leaf;
     }
+
+  return NULL;
+}
+
+/* The leaf a command is about: the one the focus is in, or the one last
+   pressed in, or the first there is. */
+static MlnNode *
+current (MlnPanes *self)
+{
+  MlnNode *focus = mln_model_get_focus (self->model);
+  MlnNode *at = focused_leaf (self);
+
+  if (at != NULL)
+    return at;
 
   if (focus != NULL && strip_for (self, focus) != NULL)
     return focus;
@@ -2622,8 +2645,28 @@ void
 mln_panes_present (MlnPanes *self, const char *id, gboolean focus)
 {
   Pane *p = pane_of (self, id);
+  MlnNode *busy = NULL, *away = NULL;
 
-  if (p == NULL || mln_model_present (self->model, id, NULL, NULL) == NULL)
+  /* Raised at somebody rather than asked for (no focus): anywhere but the
+     leaf they are working in, as mullion does -- a box put in front of the
+     file somebody is editing answers one question by hiding another. */
+  if (!focus && mln_model_loaded (self->model))
+    {
+      busy = focused_leaf (self);
+
+      for (guint i = 0; i < self->strips->len && busy != NULL; i++)
+        {
+          Strip *s = self->strips->pdata[i];
+
+          if (s->leaf != busy && gtk_widget_get_child_visible (s->strip))
+            {
+              away = s->leaf;
+              break;
+            }
+        }
+    }
+
+  if (p == NULL || mln_model_present (self->model, id, away, busy) == NULL)
     return;
 
   render (self);

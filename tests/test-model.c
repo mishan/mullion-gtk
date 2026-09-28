@@ -616,6 +616,97 @@ ids_from_the_tree (void)
   teardown (&f);
 }
 
+static void
+lenient_defaults (void)
+{
+  Fixture f;
+
+  /* Read through `known' only, as mullion reads a default: a split of one
+     is that one, where a kept layout like it would be refused. */
+  setup (&f, "a b", "{\"dir\":\"row\",\"size\":[1],\"kids\":[{\"tabs\":[\"b\"]}]}", FALSE);
+  assert_tree (&f, "{\"tabs\":[\"b\"],\"active\":0}");
+  g_assert_false (mln_model_set_default (f.m, "x", "not json"));
+  g_assert_false (mln_model_set_default (f.m, "x", "[1]"));
+  g_assert_true (mln_model_set_default (f.m, "x", "{\"dir\":\"up\"}"));
+  teardown (&f);
+}
+
+static void
+reopen_is_a_change (void)
+{
+  Fixture f;
+  MlnNode *b;
+
+  setup (&f, "a b c",
+         "{\"dir\":\"row\",\"size\":[1,1],\"kids\":[{\"tabs\":[\"a\",\"c\"]},{\"tabs\":[\"b\"]}]}",
+         FALSE);
+  b = mln_model_leaf_with (f.m, "b");
+  mln_model_set_focus (f.m, b);
+  mln_model_close (f.m, "c");
+  f.h.changed = 0;
+
+  /* Back where it was; a change, told once; the focus not moved. */
+  g_assert_true (mln_model_reopen (f.m, "c") == mln_model_leaf_with (f.m, "a"));
+  g_assert_cmpint (f.h.changed, ==, 1);
+  g_assert_true (mln_model_get_focus (f.m) == b);
+
+  /* Not closed: nothing to reopen. */
+  g_assert_null (mln_model_reopen (f.m, "c"));
+  teardown (&f);
+}
+
+static void
+reopen_clears_the_front_kept_for_a_pane_to_come (void)
+{
+  Fixture f;
+
+  /* An ephemeral pane `later' promises, in front, removed by the app: its
+     place and its front are kept. A person then reopens a pane into that
+     leaf, which is theirs to have put in front: the pane added back
+     quietly goes behind it (the review's differential case). */
+  setup (&f, "a b", "{\"tabs\":[\"a\",\"b\"]}", TRUE);
+  g_ptr_array_add (f.h.later, g_strdup ("e"));
+  mln_model_add (f.m, "e", 100, FALSE, NULL, TRUE, NULL);
+  mln_model_close (f.m, "b");
+  mln_model_present (f.m, "e", NULL, NULL);
+  mln_model_remove (f.m, "e");
+  mln_model_reopen (f.m, "b");
+  mln_model_add (f.m, "e", 100, FALSE, NULL, FALSE, NULL);
+  g_assert_cmpint (mln_model_where (f.m, "b"), ==, MLN_WHERE_FRONT);
+  teardown (&f);
+}
+
+static MlnModel *reentered;
+
+static void
+replace_layout_cb (const char *mode, gpointer data)
+{
+  if (reentered != NULL)
+    {
+      MlnModel *m = reentered;
+
+      reentered = NULL;
+      mln_model_set_layout (m, "{\"tabs\":[\"a\"]}");
+    }
+}
+
+static void
+hook_reenters_add (void)
+{
+  MlnModelHooks hooks = { NULL, NULL, NULL, replace_layout_cb };
+  MlnModel *m = mln_model_new (&hooks, NULL);
+
+  /* A changed hook that puts up another layout while `add' is telling it:
+     the leaf `add' was working with is gone by the time it returns. */
+  mln_model_register (m, "a", 100);
+  mln_model_register (m, "b", 100);
+  mln_model_set_mode (m, "m");
+  mln_model_load (m, "{\"dir\":\"row\",\"size\":[1,1],\"kids\":[{\"tabs\":[\"a\"]},{\"tabs\":[\"b\"]}]}");
+  reentered = m;
+  mln_model_add (m, "x", 100, TRUE, "b", TRUE, NULL);
+  mln_model_free (m);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -640,6 +731,10 @@ main (int argc, char **argv)
   g_test_add_func ("/model/zoom", zoom);
   g_test_add_func ("/model/stale-focus", stale_focus);
   g_test_add_func ("/model/ids-from-the-tree", ids_from_the_tree);
+  g_test_add_func ("/model/lenient-defaults", lenient_defaults);
+  g_test_add_func ("/model/reopen-is-a-change", reopen_is_a_change);
+  g_test_add_func ("/model/reopen-clears-was-front", reopen_clears_the_front_kept_for_a_pane_to_come);
+  g_test_add_func ("/model/hook-reenters-add", hook_reenters_add);
 
   return g_test_run ();
 }
