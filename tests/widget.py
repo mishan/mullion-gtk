@@ -481,6 +481,42 @@ def floats_kept(d):
     check("inspector" in d.shown(), "with its pane in view")
 
 
+def corner(d):
+    g = d.geometry()
+    ex, ey, ew, eh = g["editor"]["tab"]
+    lx, ly, lw, lh = g["editor"]["leaf"]
+    # Its icon and, in front, its cross: no title.
+    check(ey < ly + 10 and ex > lx + lw / 2 and ew < 90,
+          f"in the corner, a tab is its icon, over the leaf's top end: {g['editor']}")
+    widths = [int(w) for w in d.lines("corner editor ")]
+    check(widths and widths[-1] > ew,
+          f"and the leaf's corner is at least that wide: {widths}")
+
+    d.click(*d.centre("drawing"))
+    check(tabs(d.kept())[0] == (["editor", "drawing"], 1),
+          f"an icon clicked raises its pane: {tabs(d.kept())}")
+
+    # The inspector alone in its leaf: its tab is a grip, dragged onto the
+    # other leaf's icons, before the first.
+    ix, iy = d.centre("inspector")
+
+    def before_editor(g):
+        x, y, w, h = g["editor"]["tab"]
+        return x + 3, y + h / 2
+
+    d.drag(ix, iy, before_editor)
+    check(tabs(d.kept())[0] == (["inspector", "editor", "drawing"], 0),
+          f"a grip dropped on a corner's icons goes before the one under it: {tabs(d.kept())}")
+
+    d.key("ctrl+t")                     # the demo's header toggle
+    g = d.geometry()
+    ex, ey, ew, eh = g["editor"]["tab"]
+    lx, ly, lw, lh = g["editor"]["leaf"]
+    check(d.lines("header ") == ["strip"] and ey == ly and ex < lx + lw / 2,
+          f"and back in a strip, the tabs are across the top: {g['editor']}")
+    check(d.lines("corner editor ")[-1] == "0", "with no corner to leave room for")
+
+
 def right_to_left(d):
     ex, ey, ew, eh = d.geometry()["editor"]["leaf"]
     ix = d.geometry()["inspector"]["leaf"][0]
@@ -523,6 +559,9 @@ scenario(floats_kept, env={"MLN_DEMO_LAYOUT": json.dumps({
     "layout": {"dir": "col", "size": [0.7, 0.3], "kids": [
         {"tabs": ["editor", "drawing"]}, {"tabs": ["console"]}]},
     "floating": [{"layout": {"tabs": ["inspector"]}, "size": [300, 200]}]})})
+
+print("# corner")
+scenario(corner, env={"MLN_DEMO_CORNER": "1"})
 
 print("# placed")
 scenario(placed, env={"MLN_DEMO_PLACEMENT": "1"})

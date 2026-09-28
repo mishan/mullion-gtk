@@ -38,6 +38,22 @@ is made again; closing one docks it. They are kept with the layout, with
 their sizes. Positions are not: Wayland does not give them, and X11's
 are the window manager's.
 
+## Tabs in the corner
+
+`mln_panes_set_header (panes, MLN_HEADER_CORNER)` (the `header`
+property) takes the tab strip off every leaf and puts its tabs over the
+leaf's top corner, in sight while the pointer or the focus is in the leaf
+or a tab is being dragged: the panes' icons (`mln_panes_set_icon`; the
+title for a pane without one), a grip for a pane alone in its leaf, the
+front pane's cross, and a button for its tab menu. They raise, drag, drop
+and take the keys as a strip's tabs do; the pane has the whole leaf. In a
+strip, an icon sits before the title.
+
+Laid over the pane, the corner covers whatever its first row has at that
+end. `mln_panes_get_corner_width` says how much, and `::corner-changed`
+when that may have changed, for a pane that makes room (a margin on its
+toolbar, say). mullion's `header: 'corner'` is the same, for a web page.
+
 ## What it adds to mullion's layouts
 
 Fields mullion does not write and reads past, for what a desktop app
