@@ -7,6 +7,8 @@ layouts kept and restored. It is the model of
 web page, and it keeps layouts mullion can read and reads the ones
 mullion keeps.
 
+![Tabs dragged to split a leaf, to join one, out into a window of their own and back; a pane closed and put back from the drawer](demo/demo.gif)
+
 Work in progress. What is here so far:
 
 - `src/mln-model.{h,c}`: the layout model, GLib only, ported one function
@@ -15,7 +17,8 @@ Work in progress. What is here so far:
   `JSON.parse` and `JSON.stringify` do.
 - `src/mln-panes.{h,c}`: `MlnPanes`, the widget: tab strips, dividers, the
   drawer, tab drags, mullion's keyboard chords, a tab menu.
-- `demo/`: a window of four panes to try it on.
+- `demo/`: a window of four panes to try it on, and `record.py`, which
+  records it for the GIF above.
 - `tests/`: the model's operations, the JSON, and mullion's layout cases
   (`tests/layouts.json`, copied from mullion's `test/layouts.json`; keep
   the two the same).
