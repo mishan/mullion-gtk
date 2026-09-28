@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.1 — 2026-09-29
+## 0.2.1 — 2026-09-28
 
 - **Fixed**: closing the last pane of a floating window by its tab's cross,
   Alt W or its tab menu crashed: the window closed with it, and the click
