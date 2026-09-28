@@ -11,6 +11,11 @@
 
 #include <stdio.h>
 
+#ifdef G_OS_UNIX
+#include <glib-unix.h>
+#include <signal.h>
+#endif
+
 static const char *LAYOUT =
   "{\"dir\":\"row\",\"size\":[0.62,0.38],\"kids\":["
   "{\"dir\":\"col\",\"size\":[0.7,0.3],\"kids\":["
@@ -155,6 +160,17 @@ quit (GSimpleAction *action, GVariant *param, gpointer app)
   g_application_quit (G_APPLICATION (app));
 }
 
+#ifdef G_OS_UNIX
+static gboolean
+term (gpointer app)
+{
+  g_print ("quit-on-term\n");
+  g_application_quit (G_APPLICATION (app));
+
+  return G_SOURCE_REMOVE;
+}
+#endif
+
 static void
 clear_console (GSimpleAction *action, GVariant *param, gpointer data)
 {
@@ -253,6 +269,13 @@ main (int argc, char **argv)
                                              G_APPLICATION_DEFAULT_FLAGS);
 
   g_signal_connect (app, "activate", G_CALLBACK (activate), NULL);
+
+#ifdef G_OS_UNIX
+  /* A harness's way out when the keys do not reach the window -- X11 with
+     no window manager leaves the focus nowhere once the window that had
+     it is gone -- by the same quit Ctrl Q is. */
+  g_unix_signal_add (SIGTERM, (GSourceFunc) term, app);
+#endif
 
   return g_application_run (G_APPLICATION (app), argc, argv);
 }

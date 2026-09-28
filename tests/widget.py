@@ -74,11 +74,15 @@ class Demo:
         return f[-1] if f else None
 
     def quit(self):
-        """Ctrl Q, and wait for it to go: dispose runs, under ASan."""
+        """Ctrl Q, and wait for it to go: dispose runs, under ASan. Where
+        the key reaches no window, the same quit by SIGTERM (see the
+        demo's main)."""
         self.s.key("ctrl+q")
-        for _ in range(100):
+        for tries in range(160):
             if self.proc.poll() is not None:
                 return self.proc.returncode
+            if tries == 60:
+                self.proc.terminate()
             time.sleep(0.1)
         return None
 
@@ -444,9 +448,6 @@ def drags_out_and_in(d):
     k = d.kept()
     check("floating" not in k and tabs(k)[-1] == (["inspector", "console"], 1),
           f"and dragged into another window's leaf, it lands there: {k}")
-    # With no window manager, X11 leaves the input focus nowhere once the
-    # window that had it is gone; a click gives it back for Ctrl Q.
-    d.click(*d.centre("editor"))
 
 
 def floats_kept(d):
