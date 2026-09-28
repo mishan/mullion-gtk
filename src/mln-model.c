@@ -60,6 +60,7 @@ typedef struct
   double share;
   gboolean has_via;             /* the split it was in collapsed ... */
   MlnDir via;                   /* ... and ran this way */
+  char **slots;                 /* the slots its leaf gave away */
 } Spot;
 
 struct _MlnModel
@@ -264,6 +265,7 @@ placement_free (Placement *p)
 static void
 spot_free (Spot *s)
 {
+  g_strfreev (s->slots);
   mln_node_unref (s->next);
   g_free (s);
 }
@@ -667,7 +669,21 @@ known (MlnModel *m, const MlnJson *n, GHashTable *taken)
       {
         MlnNode *kept = known (m, mln_json_index (kids, i), taken);
 
-        if (kept == NULL)
+        /* As empty() does: to the leaf before, where there is one kept
+           already, and to the one after for those at the front. */
+        if (kept == NULL && split->kids->len > 0)
+          {
+            GPtrArray *lost = g_ptr_array_new ();
+            MlnNode *before = last_leaf (kid_at (split, split->kids->len - 1));
+
+            json_slots (mln_json_index (kids, i), lost);
+
+            for (guint k = 0; k < lost->len; k++)
+              add_slot (before, lost->pdata[k]);
+
+            g_ptr_array_free (lost, TRUE);
+          }
+        else if (kept == NULL)
           json_slots (mln_json_index (kids, i), orphans);
         else
           {
@@ -691,12 +707,6 @@ known (MlnModel *m, const MlnJson *n, GHashTable *taken)
           }
       }
 
-    /* Dropped at the end: the leaf before them has them. */
-    if (split->kids->len > 0)
-      for (guint k = 0; k < orphans->len; k++)
-        add_slot (last_leaf (kid_at (split, split->kids->len - 1)),
-                  orphans->pdata[k]);
-
     g_ptr_array_free (orphans, TRUE);
     }
 
@@ -710,6 +720,26 @@ known (MlnModel *m, const MlnJson *n, GHashTable *taken)
   }
 }
 
+static void
+one_slot_each (MlnNode *n, GHashTable *seen)
+{
+  if (!n->leaf)
+    {
+      for (guint i = 0; i < n->kids->len; i++)
+        one_slot_each (kid_at (n, i), seen);
+
+      return;
+    }
+
+  for (guint i = 0; n->slots != NULL && i < n->slots->len; )
+    {
+      if (g_hash_table_contains (seen, n->slots->pdata[i]))
+        g_ptr_array_remove_index (n->slots, i);
+      else
+        g_hash_table_add (seen, n->slots->pdata[i++]);
+    }
+}
+
 static MlnNode *
 known_of (MlnModel *m, const MlnJson *n)
 {
@@ -717,6 +747,16 @@ known_of (MlnModel *m, const MlnJson *n)
   MlnNode *made = known (m, n, taken);
 
   g_hash_table_unref (taken);
+
+  /* A slot names one leaf: the first to have it, in the tree's order, as
+     a pane named twice is kept where it is named first. */
+  if (made != NULL)
+    {
+      GHashTable *seen = g_hash_table_new (g_str_hash, g_str_equal);
+
+      one_slot_each (made, seen);
+      g_hash_table_unref (seen);
+    }
 
   return made;
 }
@@ -756,9 +796,6 @@ same_version (const MlnJson *a, const MlnJson *b)
   return mln_json_equal (a, b);
 }
 
-/* A saved layout, as the page's own tree: or NULL, for one that is not
-   there, does not parse, was kept under another version, or keeps
-   nothing this page has. */
 /* An envelope kept with no version: what is written when there is a
    closed list to keep and the page gives no version -- a layout and a
    closed list, and no version at all. An envelope with a version is no
@@ -775,6 +812,10 @@ bare_envelope (const MlnJson *j)
          mln_json_member (j, "dir") == NULL;
 }
 
+/* A saved layout, as the page's own tree: or NULL, for one that is not
+   there, does not parse, was kept under another version, or keeps
+   nothing this page has. With it, into `closed' where that is given, the
+   envelope's closed list. */
 static MlnNode *
 read_kept (MlnModel *m, const char *text, GHashTable *closed)
 {
@@ -802,7 +843,14 @@ read_kept (MlnModel *m, const char *text, GHashTable *closed)
   if (saved != NULL && sane (saved))
     tree = known_of (m, saved);
 
-  /* The panes put away that would otherwise be put up: see open_missing. */
+  if (tree != NULL && !holds_any (m, tree))
+    {
+      mln_node_unref (tree);
+      tree = NULL;
+    }
+
+  /* The panes put away that would otherwise be put up (see open_missing),
+     from a layout that is one: a refused one says nothing. */
   if (tree != NULL && envelope != NULL && closed != NULL)
     {
       const MlnJson *ids = mln_json_member (envelope, "closed");
@@ -811,12 +859,6 @@ read_kept (MlnModel *m, const char *text, GHashTable *closed)
                         i < mln_json_length (ids); i++)
         if (mln_json_string (mln_json_index (ids, i)) != NULL)
           g_hash_table_add (closed, g_strdup (mln_json_string (mln_json_index (ids, i))));
-    }
-
-  if (tree != NULL && !holds_any (m, tree))
-    {
-      mln_node_unref (tree);
-      tree = NULL;
     }
 
   mln_json_free (got);
@@ -866,8 +908,6 @@ fresh (MlnModel *m)
   return made;
 }
 
-/* What is kept: the tree trimmed of places for panes that `later' no
-   longer promises, in the version's envelope where there is one. */
 static MlnNode *leaf_with (MlnNode *n, const char *id);
 
 static gboolean
@@ -878,43 +918,56 @@ placed_open (MlnModel *m, const char *id)
   return p != NULL && p->open;
 }
 
-/* The panes a kept layout says are put away: the ones that are opened
-   where a layout does not have them, and are not in this one -- a person
-   closed them -- and those promised for later that the layout read back
-   said were put away. Without the list, closing such a pane would last
-   until the next start. */
 static int
 by_string (gconstpointer a, gconstpointer b)
 {
   return strcmp (*(const char * const *) a, *(const char * const *) b);
 }
 
+/* The panes a kept layout says are put away: the ones opened where a
+   layout does not have them that a person put away -- closed here, or
+   closed in the layout read back -- and those promised for later that it
+   said were put away. Without the list, closing such a pane would last
+   until the next start. A pane the app left out is not on it, and nor is
+   one the app adds, which comes up when added whatever the list says. */
 static GPtrArray *
 closed_list (MlnModel *m)
 {
-  GPtrArray *ids = g_ptr_array_new ();
+  GPtrArray *ids = g_ptr_array_new_with_free_func (g_free);
   GPtrArray *coming = g_ptr_array_new ();
-  GHashTableIter it;
-  const char *id;
+  GPtrArray *kept_ids;
 
   for (guint i = 0; i < m->panes->len; i++)
     {
       Pane *p = m->panes->pdata[i];
 
-      if (placed_open (m, p->id) && leaf_with (m->tree, p->id) == NULL)
-        g_ptr_array_add (ids, p->id);
+      if (placed_open (m, p->id) && !p->added && leaf_with (m->tree, p->id) == NULL &&
+          (g_hash_table_contains (m->dismissed, p->id) ||
+           g_hash_table_contains (m->closed_kept, p->id)))
+        g_ptr_array_add (ids, g_strdup (p->id));
     }
 
-  g_hash_table_iter_init (&it, m->closed_kept);
+  /* The keys first, and `later' asked of them after: the app's answer is
+     free to do anything, and a hash table iterated across it may not be
+     there when it is done. */
+  kept_ids = g_hash_table_get_keys_as_ptr_array (m->closed_kept);
 
-  while (g_hash_table_iter_next (&it, (gpointer *) &id, NULL))
-    if (pane (m, id) == NULL && later (m, id) && leaf_with (m->tree, id) == NULL)
-      g_ptr_array_add (coming, (gpointer) id);
+  for (guint i = 0; i < kept_ids->len; i++)
+    {
+      const char *id = kept_ids->pdata[i];
+
+      if (pane (m, id) == NULL && leaf_with (m->tree, id) == NULL && later (m, id) &&
+          g_hash_table_contains (m->closed_kept, id))
+        g_ptr_array_add (coming, g_strdup (id));
+    }
+
+  g_ptr_array_unref (kept_ids);
 
   /* The page's in its own order, and those to come in one that does not
      depend on a hash table's. */
   g_ptr_array_sort (coming, by_string);
 
+  /* Handed over, not copied again: they are copies already. */
   for (guint i = 0; i < coming->len; i++)
     g_ptr_array_add (ids, coming->pdata[i]);
 
@@ -923,6 +976,9 @@ closed_list (MlnModel *m)
   return ids;
 }
 
+/* What is kept: the tree trimmed of places for panes that `later' no
+   longer promises, in the version's envelope where there is one, or with
+   a closed list to keep. */
 static char *
 kept (MlnModel *m)
 {
@@ -981,6 +1037,33 @@ kept (MlnModel *m)
   return g_string_free (out, FALSE);
 }
 
+/* The layout as it stands, as a change is measured: the tree, and the
+   closed list, which can change without it -- a placement, a pane
+   removed. */
+static char *
+state (MlnModel *m)
+{
+  GPtrArray *closed;
+  GString *out;
+
+  if (m->tree == NULL)
+    return g_strdup ("null");
+
+  closed = closed_list (m);
+  out = g_string_new (NULL);
+  write_node (out, m->tree);
+
+  for (guint i = 0; i < closed->len; i++)
+    {
+      g_string_append (out, i == 0 ? "|closed:" : ",");
+      mln_json_write_string (out, closed->pdata[i]);
+    }
+
+  g_ptr_array_free (closed, TRUE);
+
+  return g_string_free (out, FALSE);
+}
+
 static void
 save (MlnModel *m)
 {
@@ -998,7 +1081,7 @@ save (MlnModel *m)
 static gboolean
 told (MlnModel *m)
 {
-  char *now = snapshot (m);
+  char *now = state (m);
 
   if (m->last != NULL && strcmp (now, m->last) == 0)
     {
@@ -1020,7 +1103,7 @@ told (MlnModel *m)
 static void
 changed (MlnModel *m)
 {
-  char *now = snapshot (m);
+  char *now = state (m);
   gboolean same = m->last != NULL && strcmp (now, m->last) == 0;
 
   g_free (now);
@@ -1197,6 +1280,16 @@ drawer (MlnModel *m, const char *id)
       s->after = i > 0;
       s->dir = up->dir;
       s->share = size_at (up, i) / total;
+
+      /* The leaf is about to go and give its slots away; they come back
+         with it (see reopen). */
+      if (leaf->slots != NULL && leaf->slots->len > 0)
+        {
+          s->slots = g_new0 (char *, leaf->slots->len + 1);
+
+          for (guint k = 0; k < leaf->slots->len; k++)
+            s->slots[k] = g_strdup (leaf->slots->pdata[k]);
+        }
       g_hash_table_replace (m->spot, g_strdup (id), s);
     }
 
@@ -1302,6 +1395,19 @@ beside (MlnModel *m, const char *id, MlnNode *leaf, MlnDir dir, gboolean after)
   mln_node_unref (pair);
 }
 
+static MlnNode *slot_leaf (MlnNode *n, const char *name);
+
+static void
+remove_slot (MlnNode *leaf, const char *name)
+{
+  for (guint i = 0; leaf->slots != NULL && i < leaf->slots->len; i++)
+    if (strcmp (leaf->slots->pdata[i], name) == 0)
+      {
+        g_ptr_array_remove_index (leaf->slots, i);
+        return;
+      }
+}
+
 /*
  * Back out of the drawer, to where it was: the leaf it was last in, if
  * the tree still has it; or a leaf of its own beside the neighbor it
@@ -1330,6 +1436,24 @@ reopen (MlnModel *m, const char *id, MlnNode *fallback, MlnNode *avoid)
     }
 
   made = back != NULL && back->tabs->len == 0 ? mln_node_ref (back) : new_leaf ();
+
+  /* The slots its old leaf gave away when it went, back with the room it
+     is made again in: into() below forgets the spot. */
+  {
+    char **lent = g_strdupv (was->slots);
+
+    for (char **name = lent; name != NULL && *name != NULL; name++)
+      {
+        MlnNode *holder = slot_leaf (m->tree, *name);
+
+        if (holder != NULL && holder != made)
+          remove_slot (holder, *name);
+
+        add_slot (made, *name);
+      }
+
+    g_strfreev (lent);
+  }
   up = parent_of (m->tree, was->next);
 
   if (up != NULL && up->dir == was->dir)
@@ -1484,6 +1608,7 @@ open_missing (MlnModel *m, GHashTable *closed)
       /* At the end: the tabs in play before it keep their places, and so
          the front one keeps its index. */
       g_ptr_array_add (leaf->tabs, g_strdup (p->id));
+      g_hash_table_remove (m->dismissed, p->id);
 
       if (live_count (m, leaf) == 1)
         leaf->active = 0;
@@ -1623,6 +1748,10 @@ mln_model_set_mode (MlnModel *m, const char *mode)
   g_free (m->where);
   m->where = g_strdup (mode);
   set_node (&m->tree, NULL);
+
+  /* What the last mode's kept layout said was closed is about that
+     mode's. */
+  g_hash_table_remove_all (m->closed_kept);
   set_node (&m->zoom, NULL);
   set_node (&m->focus, NULL);
 }
@@ -1648,6 +1777,10 @@ mln_model_set_placement (MlnModel *m, const char *id, const char *slot,
   p->slot = g_strdup (slot);
   p->open = open;
   g_hash_table_replace (m->placement, g_strdup (id), p);
+
+  /* A pane no longer opened is no longer kept as closed. */
+  if (m->tree != NULL)
+    told (m);
 }
 
 static Pane *
@@ -1774,7 +1907,9 @@ mln_model_remove (MlnModel *m, const char *id)
   else
     g_hash_table_remove (m->was_front, mine);
 
-  if (held)
+  /* Told if it was drawn, and kept if it was on the closed list: told
+     does both, and only where something changed. */
+  if (m->tree != NULL)
     told (m);
 
   g_free (front);
@@ -1911,7 +2046,7 @@ mln_model_load (MlnModel *m, const char *text)
   set_node (&m->zoom, NULL);
 
   g_free (m->last);
-  m->last = snapshot (m);
+  m->last = state (m);
   open_missing (m, m->closed_kept);
   stray (m);
   told (m);
@@ -1983,7 +2118,7 @@ mln_model_reset (MlnModel *m)
   mln_model_settle (m);
 
   g_free (m->last);
-  m->last = snapshot (m);
+  m->last = state (m);
 
   if (m->hooks.changed != NULL)
     m->hooks.changed (m->where, m->data);
@@ -2031,7 +2166,7 @@ mln_model_settle (MlnModel *m)
 static void
 after_move (MlnModel *m, char *was)
 {
-  char *now = snapshot (m);
+  char *now = state (m);
 
   if (strcmp (now, was) != 0)
     changed (m);
@@ -2052,7 +2187,7 @@ mln_model_drop_tab (MlnModel *m, const char *id, MlnNode *leaf, const char *befo
     char *mine = g_strdup (id);
     char *ahead = g_strdup (before);
 
-    was = snapshot (m);
+    was = state (m);
     into (m, mine, leaf, ahead == NULL ? AT_END : BEFORE, ahead);
     after_move (m, was);
     g_free (ahead);
@@ -2071,7 +2206,7 @@ mln_model_drop_into (MlnModel *m, const char *id, MlnNode *leaf)
   {
     char *mine = g_strdup (id);
 
-    was = snapshot (m);
+    was = state (m);
     into (m, mine, leaf, ANYWHERE, NULL);
     after_move (m, was);
     g_free (mine);
@@ -2090,7 +2225,7 @@ mln_model_drop_beside (MlnModel *m, const char *id, MlnNode *leaf,
   {
     char *mine = g_strdup (id);
 
-    was = snapshot (m);
+    was = state (m);
     beside (m, mine, leaf, dir, after);
     after_move (m, was);
     g_free (mine);

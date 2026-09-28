@@ -36,7 +36,9 @@ needs that a page does not:
   (`{"layout":…,"closed":[…]}`) where it does not. mullion reads that one
   as no layout.
 
-A layout that uses neither is written exactly as mullion writes it.
+A layout that uses neither is written exactly as mullion writes it. One
+kept by mullion has neither: a layout that goes through the web and back
+comes back without its slots.
 
 ## Building
 

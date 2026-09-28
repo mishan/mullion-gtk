@@ -888,6 +888,124 @@ closed_panes_to_come (void)
   teardown (&f);
 }
 
+
+static void
+closed_only_by_a_person (void)
+{
+  Fixture f;
+
+  /* Placed open after the layout is up, and never put up: nobody closed
+     it, so it is not kept as closed (and comes up next time). */
+  setup (&f, "a b c", "{\"tabs\":[\"a\",\"b\"]}", FALSE);
+  mln_model_set_placement (f.m, "c", NULL, TRUE);
+  mln_model_raise (f.m, mln_model_leaf_with (f.m, "a"), 1);
+  g_assert_cmpstr (f.h.kept, ==, "{\"tabs\":[\"a\",\"b\"],\"active\":1}");
+
+  /* Nor when a layout the app puts up leaves it out. */
+  mln_model_reset (f.m);
+  g_assert_cmpint (mln_model_where (f.m, "c"), ==, MLN_WHERE_BEHIND);
+  g_assert_true (mln_model_set_layout (f.m, "{\"tabs\":[\"b\",\"a\"]}"));
+  g_assert_cmpstr (f.h.kept, ==, "{\"tabs\":[\"b\",\"a\"],\"active\":0}");
+
+  /* Closed by a person, it is; and no longer opened, it is not. */
+  mln_model_present (f.m, "c", NULL, NULL);
+  mln_model_close (f.m, "c");
+  g_assert_cmpstr (f.h.kept, ==, "{\"layout\":{\"tabs\":[\"b\",\"a\"],\"active\":1},\"closed\":[\"c\"]}");
+  mln_model_set_placement (f.m, "c", NULL, FALSE);
+  g_assert_cmpstr (f.h.kept, ==, "{\"tabs\":[\"b\",\"a\"],\"active\":1}");
+  teardown (&f);
+}
+
+static void
+closed_read_back_and_modes (void)
+{
+  Fixture f;
+
+  setup (&f, "a b c", NULL, FALSE);
+  g_assert_true (mln_model_set_version (f.m, "2"));
+  mln_model_set_placement (f.m, "c", NULL, TRUE);
+
+  /* Read back under its version: kept closed, and still listed. */
+  g_assert_true (mln_model_load (f.m, "{\"version\":2,\"layout\":{\"tabs\":[\"a\",\"b\"]},\"closed\":[\"c\"]}"));
+  g_assert_cmpint (mln_model_where (f.m, "c"), ==, MLN_WHERE_DRAWER);
+  mln_model_raise (f.m, mln_model_leaf_with (f.m, "a"), 1);
+  g_assert_cmpstr (f.h.kept, ==, "{\"version\":2,\"layout\":{\"tabs\":[\"a\",\"b\"],\"active\":1},"
+                                 "\"closed\":[\"c\"]}");
+
+  /* A layout that is refused says nothing about what is closed. */
+  g_ptr_array_add (f.h.later, g_strdup ("y"));
+  g_assert_false (mln_model_load (f.m, "{\"version\":2,\"layout\":{\"tabs\":[\"y\"]},\"closed\":[\"c\"]}"));
+  g_assert_cmpint (mln_model_where (f.m, "c"), !=, MLN_WHERE_DRAWER);
+
+  /* And what one mode's layout said is not another's. */
+  g_assert_true (mln_model_load (f.m, "{\"version\":2,\"layout\":{\"tabs\":[\"a\"]},\"closed\":[\"y\"]}"));
+  mln_model_set_mode (f.m, "other");
+  mln_model_load (f.m, NULL);
+  mln_model_raise (f.m, mln_model_leaf_with (f.m, "a"), 1);
+  g_assert_null (strstr (f.h.kept, "closed"));
+  teardown (&f);
+}
+
+static void
+added_panes_are_not_listed (void)
+{
+  Fixture f;
+  gboolean added;
+
+  setup (&f, "a", NULL, TRUE);
+  mln_model_set_placement (f.m, "c", NULL, TRUE);
+  mln_model_add (f.m, "c", 100, TRUE, NULL, TRUE, &added);
+  mln_model_close (f.m, "c");
+  g_assert_null (strstr (f.h.kept, "closed"));
+  teardown (&f);
+}
+
+static void
+a_slot_comes_back_with_its_room (void)
+{
+  Fixture f;
+
+  setup (&f, "a b c", SLOTTED, FALSE);
+  mln_model_set_placement (f.m, "c", "end", FALSE);
+
+  /* b closed, the end slot lent to a; b back where it was, and the slot
+     with it. */
+  mln_model_close (f.m, "b");
+  mln_model_present (f.m, "b", NULL, NULL);
+  assert_tree (&f, "{\"dir\":\"row\",\"size\":[0.5,0.5],\"kids\":["
+                   "{\"tabs\":[\"a\"],\"active\":0,\"slots\":[\"start\"]},"
+                   "{\"tabs\":[\"b\"],\"active\":0,\"slots\":[\"end\"]}]}");
+
+  mln_model_present (f.m, "c", NULL, NULL);
+  g_assert_true (mln_model_leaf_with (f.m, "c") == mln_model_leaf_with (f.m, "b"));
+  teardown (&f);
+}
+
+static void
+dropped_slots_go_as_emptied_ones_do (void)
+{
+  Fixture f;
+
+  /* A leaf in the middle, dropped on reading: to the leaf before it, as
+     closing its last pane would. */
+  setup (&f, "a b",
+         "{\"dir\":\"row\",\"size\":[1,1,1],\"kids\":[{\"tabs\":[\"a\"]},"
+         "{\"tabs\":[\"x\"],\"slots\":[\"s\"]},{\"tabs\":[\"b\"]}]}", FALSE);
+  assert_tree (&f, "{\"dir\":\"row\",\"size\":[1,1],\"kids\":["
+                   "{\"tabs\":[\"a\"],\"active\":0,\"slots\":[\"s\"]},"
+                   "{\"tabs\":[\"b\"],\"active\":0}]}");
+  teardown (&f);
+
+  /* And a slot two leaves name is the first one's. */
+  setup (&f, "a b",
+         "{\"dir\":\"row\",\"size\":[1,1,1],\"kids\":[{\"tabs\":[\"x\"],\"slots\":[\"s\"]},"
+         "{\"tabs\":[\"a\"]},{\"tabs\":[\"b\"],\"slots\":[\"s\"]}]}", FALSE);
+  assert_tree (&f, "{\"dir\":\"row\",\"size\":[1,1],\"kids\":["
+                   "{\"tabs\":[\"a\"],\"active\":0,\"slots\":[\"s\"]},"
+                   "{\"tabs\":[\"b\"],\"active\":0}]}");
+  teardown (&f);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -922,6 +1040,11 @@ main (int argc, char **argv)
   g_test_add_func ("/model/open-where-missing", open_where_missing);
   g_test_add_func ("/model/closed-with-a-version", closed_with_a_version);
   g_test_add_func ("/model/closed-panes-to-come", closed_panes_to_come);
+  g_test_add_func ("/model/closed-only-by-a-person", closed_only_by_a_person);
+  g_test_add_func ("/model/closed-read-back-and-modes", closed_read_back_and_modes);
+  g_test_add_func ("/model/added-panes-are-not-listed", added_panes_are_not_listed);
+  g_test_add_func ("/model/a-slot-comes-back-with-its-room", a_slot_comes_back_with_its_room);
+  g_test_add_func ("/model/dropped-slots-go-as-emptied-ones-do", dropped_slots_go_as_emptied_ones_do);
 
   return g_test_run ();
 }

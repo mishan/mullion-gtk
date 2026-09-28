@@ -97,8 +97,9 @@ MLN_EXPORT void        mln_panes_set_pane_menu (MlnPanes *self, const char *id,
    person was working in. If `open', it is also put there whenever a
    layout is loaded or reset without it -- a pane new since the layout was
    kept comes up -- unless the kept layout lists it as closed: a person
-   closed it, and it stays closed. May be called before the pane is
-   registered or added. */
+   closed it, and it stays closed. Call it before mln_panes_load, with the
+   panes: called after, it takes effect from the next load or reset. May
+   be called before the pane is registered or added. */
 MLN_EXPORT void        mln_panes_set_placement (MlnPanes *self, const char *id,
                                      const char *slot, gboolean open);
 MLN_EXPORT void        mln_panes_set_later_func (MlnPanes *self, MlnLaterFunc func,

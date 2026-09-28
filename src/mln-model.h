@@ -114,7 +114,9 @@ MlnNode    *mln_model_add           (MlnModel *m, const char *id, double min,
    leaf last focused. And, if `open', it is put there when a layout is
    loaded or reset without it, unless the kept layout lists it as closed:
    a pane new since the layout was kept comes up, and one a person closed
-   stays closed. May be set before the pane is taken on. */
+   stays closed. Set it before mln_model_load, as the app registers its
+   panes: set after, it takes effect from the next load or reset. May be
+   set before the pane is taken on. */
 void        mln_model_set_placement (MlnModel *m, const char *id,
                                      const char *slot, gboolean open);
 
