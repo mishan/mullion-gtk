@@ -354,6 +354,19 @@ def tab_order(d):
           f"and only the front tabs' crosses: {seen}")
 
 
+def placed(d):
+    k = d.kept()
+    check(tabs(k)[-1] == (["inspector", "notes"], 0),
+          f"a pane opened by placement comes up in its slot, behind: {tabs(k)}")
+    d.click(*d.centre("notes"))
+    x, y, w, h = d.geometry()["notes"]["tab"]
+    d.click(x + w - 14, y + h / 2)      # its cross
+    k = d.kept()
+    check(k.get("closed") == ["notes"] and "layout" in k and
+          all("notes" not in t for t, _ in tabs(k["layout"])),
+          f"closed, it is kept as closed: {k}")
+
+
 def right_to_left(d):
     ex, ey, ew, eh = d.geometry()["editor"]["leaf"]
     ix = d.geometry()["inspector"]["leaf"][0]
@@ -376,6 +389,9 @@ for fn in (starts, raises, closes_and_reopens, drags_beside, drags_onto_a_strip,
 
 # On X11 with no window manager, GTK puts a right-to-left window at
 # x = 1 - width, off the screen; sway puts it where it goes.
+print("# placed")
+scenario(placed, env={"MLN_DEMO_PLACEMENT": "1"})
+
 print("# right_to_left")
 if WAYLAND:
     scenario(right_to_left, env={"MLN_DEMO_RTL": "1"})

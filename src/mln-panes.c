@@ -2498,6 +2498,16 @@ mln_panes_register (MlnPanes *self, const char *id, const char *title,
   return TRUE;
 }
 
+void
+mln_panes_set_placement (MlnPanes *self, const char *id, const char *slot,
+                         gboolean open)
+{
+  g_return_if_fail (MLN_IS_PANES (self));
+  g_return_if_fail (id != NULL);
+
+  mln_model_set_placement (self->model, id, slot, open);
+}
+
 gboolean
 mln_panes_add (MlnPanes *self, const char *id, const char *title,
                GtkWidget *content, int min_width, MlnPaneFlags flags,

@@ -15,7 +15,7 @@ static const char *LAYOUT =
   "{\"dir\":\"row\",\"size\":[0.62,0.38],\"kids\":["
   "{\"dir\":\"col\",\"size\":[0.7,0.3],\"kids\":["
   "{\"tabs\":[\"editor\",\"drawing\"]},{\"tabs\":[\"console\"]}]},"
-  "{\"tabs\":[\"inspector\"]}]}";
+  "{\"tabs\":[\"inspector\"],\"slots\":[\"side\"]}]}";
 
 static GtkWidget *
 text (const char *what)
@@ -44,7 +44,8 @@ shown (MlnPanes *panes, const char *id, gboolean on, gpointer data)
   g_print ("pane-shown %s %s\n", id, on ? "on" : "off");
 }
 
-static const char *IDS[] = { "editor", "console", "inspector", "drawing" };
+/* notes only with MLN_DEMO_PLACEMENT; without it, it has no parts. */
+static const char *IDS[] = { "editor", "console", "inspector", "drawing", "notes" };
 
 /* Where everything is, on one line, once the layout has been drawn: for a
    harness that clicks and drags, which cannot know the fonts. */
@@ -175,6 +176,16 @@ activate (GtkApplication *app)
   mln_panes_register (MLN_PANES (panes), "inspector", "Inspector",
                       text ("width  240\nheight  64\n"), 160);
   mln_panes_register (MLN_PANES (panes), "drawing", "Drawing", drawing, 120);
+
+  /* A pane the layout above does not have, opened in the side slot
+     wherever a layout does not have it: what a pane new in a release
+     does to a layout kept by the one before. */
+  if (g_getenv ("MLN_DEMO_PLACEMENT") != NULL)
+    {
+      mln_panes_register (MLN_PANES (panes), "notes", "Notes",
+                          text ("remember the milk\n"), 120);
+      mln_panes_set_placement (MLN_PANES (panes), "notes", "side", TRUE);
+    }
 
   g_signal_connect (panes, "pane-shown", G_CALLBACK (shown), NULL);
   g_signal_connect (panes, "layout-kept", G_CALLBACK (kept), NULL);

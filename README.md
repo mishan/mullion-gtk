@@ -20,6 +20,24 @@ Work in progress. What is here so far:
   (`tests/layouts.json`, copied from mullion's `test/layouts.json`; keep
   the two the same).
 
+## What it adds to mullion's layouts
+
+Two fields mullion does not write and reads past, for what a desktop app
+needs that a page does not:
+
+- `"slots"` on a leaf: names for where a pane goes when nothing remembers
+  where it was (`mln_panes_set_placement`). A leaf that empties hands its
+  slots to the leaf that takes its room.
+- `"closed"` in the envelope: the panes a person closed that the app opens
+  wherever a layout does not have them, so that a pane new in a release
+  comes up in a layout kept by the one before, and one a person closed
+  stays closed. It is written only when there are any, in the version's
+  envelope where the app gives a version and in one of its own
+  (`{"layout":…,"closed":[…]}`) where it does not. mullion reads that one
+  as no layout.
+
+A layout that uses neither is written exactly as mullion writes it.
+
 ## Building
 
 With meson:

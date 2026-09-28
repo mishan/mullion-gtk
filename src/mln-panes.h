@@ -92,6 +92,15 @@ MLN_EXPORT void        mln_panes_set_attention (MlnPanes *self, const char *id,
    so the app's window and application actions work. NULL for none. */
 MLN_EXPORT void        mln_panes_set_pane_menu (MlnPanes *self, const char *id,
                                      GMenuModel *menu);
+/* Where a pane goes when nothing remembers where it was: the leaf whose
+   "slots" in the layout name `slot' (NULL: none), ahead of the leaf the
+   person was working in. If `open', it is also put there whenever a
+   layout is loaded or reset without it -- a pane new since the layout was
+   kept comes up -- unless the kept layout lists it as closed: a person
+   closed it, and it stays closed. May be called before the pane is
+   registered or added. */
+MLN_EXPORT void        mln_panes_set_placement (MlnPanes *self, const char *id,
+                                     const char *slot, gboolean open);
 MLN_EXPORT void        mln_panes_set_later_func (MlnPanes *self, MlnLaterFunc func,
                                       gpointer data, GDestroyNotify destroy);
 
