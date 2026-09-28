@@ -1006,6 +1006,201 @@ dropped_slots_go_as_emptied_ones_do (void)
   teardown (&f);
 }
 
+/* ---- floating windows ---- */
+
+static guint
+only_float (Fixture *f)
+{
+  GArray *ids = mln_model_floats (f->m);
+  guint id = ids->len == 1 ? g_array_index (ids, guint, 0) : 0;
+
+  g_array_unref (ids);
+
+  return id;
+}
+
+static void
+undock_and_dock (void)
+{
+  Fixture f;
+  const char *two =
+    "{\"dir\":\"row\",\"size\":[1,3],\"kids\":[{\"tabs\":[\"a\"],\"active\":0},"
+    "{\"tabs\":[\"b\",\"c\"],\"active\":1}]}";
+  guint id;
+
+  setup (&f, "a b c", two, FALSE);
+
+  /* c into a window of its own: out of its leaf, into the window's. */
+  id = mln_model_undock (f.m, "c", 400, 300);
+  g_assert_cmpuint (id, !=, 0);
+  g_assert_cmpuint (only_float (&f), ==, id);
+  assert_tree (&f, "{\"dir\":\"row\",\"size\":[1,3],\"kids\":[{\"tabs\":[\"a\"],\"active\":0},"
+                   "{\"tabs\":[\"b\"],\"active\":0}]}");
+  g_assert_cmpint (mln_model_where (f.m, "c"), ==, MLN_WHERE_FRONT);
+  g_assert_cmpuint (mln_model_float_of (f.m, mln_model_leaf_with (f.m, "c")), ==, id);
+  g_assert_cmpint (f.h.changed, ==, 1);
+
+  /* It is not closed, and the window is kept, in an envelope. */
+  {
+    GPtrArray *closed = mln_model_closed (f.m);
+
+    g_assert_cmpuint (closed->len, ==, 0);
+    g_ptr_array_unref (closed);
+  }
+
+  g_assert_cmpstr (f.h.kept, ==, "{\"layout\":{\"dir\":\"row\",\"size\":[1,3],\"kids\":["
+                   "{\"tabs\":[\"a\"],\"active\":0},{\"tabs\":[\"b\"],\"active\":0}]},"
+                   "\"floating\":[{\"layout\":{\"tabs\":[\"c\"],\"active\":0},\"size\":[400,300]}]}");
+
+  /* Undocking it again is that window. */
+  g_assert_cmpuint (mln_model_undock (f.m, "c", 1, 1), ==, id);
+
+  /* Closed, the window docks c where it was: behind b, as a tab. */
+  mln_model_dock (f.m, id);
+  g_assert_cmpuint (only_float (&f), ==, 0);
+  assert_tree (&f, "{\"dir\":\"row\",\"size\":[1,3],\"kids\":[{\"tabs\":[\"a\"],\"active\":0},"
+                   "{\"tabs\":[\"b\",\"c\"],\"active\":1}]}");
+  g_assert_cmpstr (f.h.kept, ==, "{\"dir\":\"row\",\"size\":[1,3],\"kids\":[{\"tabs\":[\"a\"],"
+                   "\"active\":0},{\"tabs\":[\"b\",\"c\"],\"active\":1}]}");
+  teardown (&f);
+}
+
+static void
+a_window_of_its_own_tree (void)
+{
+  Fixture f;
+  guint id;
+  MlnNode *leaf;
+
+  setup (&f, "a b c", "{\"tabs\":[\"a\",\"b\",\"c\"]}", FALSE);
+  id = mln_model_undock (f.m, "b", 0, 0);
+  leaf = mln_model_leaf_with (f.m, "b");
+
+  /* Dropped into the window's leaf and beside it: the window's tree. */
+  mln_model_drop_into (f.m, "c", leaf);
+  g_assert_true (mln_model_leaf_with (f.m, "c") == leaf);
+  mln_model_drop_beside (f.m, "a", leaf, MLN_ROW, TRUE);
+
+  {
+    MlnNode *root = mln_model_float_root (f.m, id);
+
+    g_assert_false (mln_node_is_leaf (root));
+    g_assert_cmpuint (mln_node_n_kids (root), ==, 2);
+  }
+
+  /* Every pane is in the window, and the main tree has none in play: it
+     is kept all the same, as an emptied one is. */
+  assert_tree (&f, "{\"tabs\":[],\"active\":0}");
+
+  /* Closing a pane out of the window closes it; the split in the window
+     collapses as one in the main tree does. */
+  mln_model_close (f.m, "a");
+  g_assert_true (mln_node_is_leaf (mln_model_float_root (f.m, id)));
+  g_assert_cmpint (mln_model_where (f.m, "a"), ==, MLN_WHERE_DRAWER);
+
+  /* The last one out of the window: the window goes. */
+  mln_model_close (f.m, "b");
+  mln_model_close (f.m, "c");
+  g_assert_cmpuint (only_float (&f), ==, 0);
+  teardown (&f);
+}
+
+static void
+dock_one_pane (void)
+{
+  Fixture f;
+  guint id;
+
+  setup (&f, "a b c",
+         "{\"dir\":\"col\",\"size\":[1,1],\"kids\":[{\"tabs\":[\"a\"]},{\"tabs\":[\"b\"]}]}",
+         FALSE);
+
+  /* b goes, and its leaf with it; a pane moved about in the window does
+     not forget where it was in the main tree. */
+  id = mln_model_undock (f.m, "b", 0, 0);
+  mln_model_drop_into (f.m, "c", mln_model_leaf_with (f.m, "b"));
+  mln_model_drop_tab (f.m, "b", mln_model_leaf_with (f.m, "c"), NULL);
+  assert_tree (&f, "{\"tabs\":[\"a\"],\"active\":0}");
+
+  mln_model_dock_pane (f.m, "b");
+  assert_tree (&f, "{\"dir\":\"col\",\"size\":[0.5,0.5],\"kids\":[{\"tabs\":[\"a\"],\"active\":0},"
+                   "{\"tabs\":[\"b\"],\"active\":0}]}");
+  g_assert_cmpuint (only_float (&f), ==, id);
+
+  /* c never was in the main tree: docked, it goes where the focus is,
+     which b's docking left on b's leaf. */
+  mln_model_dock (f.m, id);
+  g_assert_true (mln_model_leaf_with (f.m, "c") == mln_model_leaf_with (f.m, "b"));
+  teardown (&f);
+}
+
+static void
+floating_windows_are_kept (void)
+{
+  Fixture f;
+  char *kept;
+
+  setup (&f, "a b c", "{\"tabs\":[\"a\",\"b\",\"c\"]}", FALSE);
+  g_assert_true (mln_model_set_version (f.m, "1"));
+  mln_model_undock (f.m, "c", 500, 250);
+  mln_model_set_float_size (f.m, only_float (&f), 510, 260);
+  g_assert_cmpstr (f.h.kept, ==, "{\"version\":1,\"layout\":{\"tabs\":[\"a\",\"b\"],\"active\":0},"
+                   "\"floating\":[{\"layout\":{\"tabs\":[\"c\"],\"active\":0},\"size\":[510,260]}]}");
+
+  /* Read back: the window with it, under a new id. */
+  kept = g_strdup (f.h.kept);
+  g_assert_true (mln_model_load (f.m, kept));
+  g_assert_cmpuint (only_float (&f), !=, 0);
+  g_assert_cmpint (mln_model_where (f.m, "c"), ==, MLN_WHERE_FRONT);
+
+  {
+    int w = 0, h = 0;
+
+    g_assert_true (mln_model_float_size (f.m, only_float (&f), &w, &h));
+    g_assert_cmpint (w, ==, 510);
+    g_assert_cmpint (h, ==, 260);
+  }
+
+  /* A window naming a pane the main tree has is kept without it, and one
+     left with nothing is not kept; a size that is not two numbers is
+     none. */
+  g_assert_true (mln_model_load (f.m, "{\"version\":1,\"layout\":{\"tabs\":[\"a\",\"b\"]},"
+                                      "\"floating\":[{\"layout\":{\"tabs\":[\"b\"]}},"
+                                      "{\"layout\":{\"tabs\":[\"b\",\"c\"]},\"size\":\"big\"},7]}"));
+  g_assert_true (mln_model_leaf_with (f.m, "b") == mln_model_leaf_with (f.m, "a"));
+  g_assert_cmpuint (mln_model_float_of (f.m, mln_model_leaf_with (f.m, "c")), !=, 0);
+
+  {
+    int w = 1, h = 1;
+
+    mln_model_float_size (f.m, only_float (&f), &w, &h);
+    g_assert_cmpint (w, ==, 0);
+    g_assert_cmpint (h, ==, 0);
+  }
+
+  /* Reset: no windows. And a layout the app puts up is the whole one. */
+  mln_model_reset (f.m);
+  g_assert_cmpuint (only_float (&f), ==, 0);
+  mln_model_undock (f.m, "c", 0, 0);
+  g_assert_true (mln_model_set_layout (f.m, "{\"tabs\":[\"a\"]}"));
+  g_assert_cmpuint (only_float (&f), ==, 0);
+  g_assert_cmpint (mln_model_where (f.m, "c"), ==, MLN_WHERE_DRAWER);
+
+  g_free (kept);
+  teardown (&f);
+
+  /* With no version, the windows are kept in an envelope of their own. */
+  setup (&f, "a b", NULL, FALSE);
+  mln_model_undock (f.m, "b", 0, 0);
+  g_assert_cmpstr (f.h.kept, ==, "{\"layout\":{\"tabs\":[\"a\"],\"active\":0},"
+                   "\"floating\":[{\"layout\":{\"tabs\":[\"b\"],\"active\":0}}]}");
+  kept = g_strdup (f.h.kept);
+  g_assert_true (mln_model_load (f.m, kept));
+  g_assert_cmpuint (only_float (&f), !=, 0);
+  g_free (kept);
+  teardown (&f);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1045,6 +1240,10 @@ main (int argc, char **argv)
   g_test_add_func ("/model/added-panes-are-not-listed", added_panes_are_not_listed);
   g_test_add_func ("/model/a-slot-comes-back-with-its-room", a_slot_comes_back_with_its_room);
   g_test_add_func ("/model/dropped-slots-go-as-emptied-ones-do", dropped_slots_go_as_emptied_ones_do);
+  g_test_add_func ("/model/undock-and-dock", undock_and_dock);
+  g_test_add_func ("/model/a-window-of-its-own-tree", a_window_of_its_own_tree);
+  g_test_add_func ("/model/dock-one-pane", dock_one_pane);
+  g_test_add_func ("/model/floating-windows-are-kept", floating_windows_are_kept);
 
   return g_test_run ();
 }

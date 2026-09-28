@@ -51,6 +51,16 @@ typedef struct
   gboolean open;
 } Placement;
 
+/* A floating window's layout: a tree of its own, and the size it was
+   last given. The id is the model's, never reused, so the widget can tell
+   a window it has from one it has not. */
+typedef struct
+{
+  guint id;
+  MlnNode *root;
+  int w, h;
+} Float;
+
 /* Where a pane's leaf was, for a pane that was the last one in it. */
 typedef struct
 {
@@ -78,6 +88,11 @@ struct _MlnModel
   GHashTable *placement;        /* id -> Placement* */
   GHashTable *closed_kept;      /* id set: the kept layout's closed list */
 
+  GPtrArray *floats;            /* Float*, in the order made */
+  guint next_float;
+  GHashTable *away_home;        /* id -> MlnNode*: its main-tree leaf, ... */
+  GHashTable *away_spot;        /* id -> Spot*: ... and spot, when it left */
+
   GHashTable *defaults;         /* mode -> MlnJson* */
   MlnJson *version;             /* NULL: none */
 
@@ -90,6 +105,10 @@ struct _MlnModel
   double split;
   double least;
 };
+
+static MlnNode *find_leaf (MlnModel *m, const char *id);
+static gboolean in_layout (MlnModel *m, MlnNode *node);
+static char *state (MlnModel *m);
 
 /* ---- nodes ---- */
 
@@ -797,27 +816,46 @@ same_version (const MlnJson *a, const MlnJson *b)
 }
 
 /* An envelope kept with no version: what is written when there is a
-   closed list to keep and the page gives no version -- a layout and a
-   closed list, and no version at all. An envelope with a version is no
-   layout for a page without one (docs/layout.md), and this does not make
-   it one. mullion has no closed list, and reads this as no layout. */
+   closed list or a floating window to keep and the page gives no version
+   -- a layout, one or both of those, and no version at all. An envelope
+   with a version is no layout for a page without one (docs/layout.md),
+   and this does not make it one. mullion has neither, and reads this as
+   no layout. */
 static gboolean
 bare_envelope (const MlnJson *j)
 {
   return mln_json_type (j) == MLN_JSON_OBJECT &&
          mln_json_member (j, "layout") != NULL &&
-         mln_json_member (j, "closed") != NULL &&
+         (mln_json_member (j, "closed") != NULL ||
+          mln_json_member (j, "floating") != NULL) &&
          mln_json_member (j, "version") == NULL &&
          mln_json_member (j, "tabs") == NULL &&
          mln_json_member (j, "dir") == NULL;
 }
 
+static void
+take_tabs (MlnNode *n, GHashTable *taken)
+{
+  if (n->leaf)
+    {
+      for (guint i = 0; i < n->tabs->len; i++)
+        g_hash_table_add (taken, g_strdup (n->tabs->pdata[i]));
+
+      return;
+    }
+
+  for (guint i = 0; i < n->kids->len; i++)
+    take_tabs (kid_at (n, i), taken);
+}
+
 /* A saved layout, as the page's own tree: or NULL, for one that is not
    there, does not parse, was kept under another version, or keeps
-   nothing this page has. With it, into `closed' where that is given, the
-   envelope's closed list. */
+   nothing this page has. With it, into `closed' and `floats' where they
+   are given, the envelope's closed list and floating windows: each
+   window's tree read as the main one is, and a window that is not a
+   tree, or keeps nothing the main one has not taken, left out. */
 static MlnNode *
-read_kept (MlnModel *m, const char *text, GHashTable *closed)
+read_kept (MlnModel *m, const char *text, GHashTable *closed, GPtrArray *floats)
 {
   MlnJson *got = mln_json_parse (text);
   const MlnJson *saved = got, *envelope = NULL;
@@ -859,6 +897,51 @@ read_kept (MlnModel *m, const char *text, GHashTable *closed)
                         i < mln_json_length (ids); i++)
         if (mln_json_string (mln_json_index (ids, i)) != NULL)
           g_hash_table_add (closed, g_strdup (mln_json_string (mln_json_index (ids, i))));
+    }
+
+  if (tree != NULL && envelope != NULL && floats != NULL)
+    {
+      const MlnJson *wins = mln_json_member (envelope, "floating");
+      GHashTable *taken = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+
+      take_tabs (tree, taken);
+
+      for (guint i = 0; wins != NULL && mln_json_type (wins) == MLN_JSON_ARRAY &&
+                        i < mln_json_length (wins); i++)
+        {
+          const MlnJson *w = mln_json_index (wins, i);
+          const MlnJson *lay = mln_json_type (w) == MLN_JSON_OBJECT
+            ? mln_json_member (w, "layout") : NULL;
+          const MlnJson *size = lay != NULL ? mln_json_member (w, "size") : NULL;
+          MlnNode *root = lay != NULL && sane (lay) ? known (m, lay, taken) : NULL;
+          Float *f;
+
+          if (root == NULL || !holds_any (m, root))
+            {
+              mln_node_unref (root);
+              continue;
+            }
+
+          f = g_new0 (Float, 1);
+          f->root = root;
+
+          /* A size that is not two numbers is the widget's to choose. */
+          if (size != NULL && mln_json_type (size) == MLN_JSON_ARRAY &&
+              mln_json_length (size) == 2 &&
+              mln_json_type (mln_json_index (size, 0)) == MLN_JSON_NUMBER &&
+              mln_json_type (mln_json_index (size, 1)) == MLN_JSON_NUMBER)
+            {
+              double w_ = mln_json_number (mln_json_index (size, 0));
+              double h_ = mln_json_number (mln_json_index (size, 1));
+
+              f->w = isfinite (w_) && w_ > 0 && w_ < 1e5 ? (int) w_ : 0;
+              f->h = isfinite (h_) && h_ > 0 && h_ < 1e5 ? (int) h_ : 0;
+            }
+
+          g_ptr_array_add (floats, f);
+        }
+
+      g_hash_table_unref (taken);
     }
 
   mln_json_free (got);
@@ -908,8 +991,6 @@ fresh (MlnModel *m)
   return made;
 }
 
-static MlnNode *leaf_with (MlnNode *n, const char *id);
-
 static gboolean
 placed_open (MlnModel *m, const char *id)
 {
@@ -941,7 +1022,7 @@ closed_list (MlnModel *m)
     {
       Pane *p = m->panes->pdata[i];
 
-      if (placed_open (m, p->id) && !p->added && leaf_with (m->tree, p->id) == NULL &&
+      if (placed_open (m, p->id) && !p->added && find_leaf (m, p->id) == NULL &&
           (g_hash_table_contains (m->dismissed, p->id) ||
            g_hash_table_contains (m->closed_kept, p->id)))
         g_ptr_array_add (ids, g_strdup (p->id));
@@ -966,7 +1047,7 @@ closed_list (MlnModel *m)
     {
       const char *id = kept_ids->pdata[i];
 
-      if (pane (m, id) == NULL && leaf_with (m->tree, id) == NULL && later (m, id) &&
+      if (pane (m, id) == NULL && find_leaf (m, id) == NULL && later (m, id) &&
           g_hash_table_contains (m->closed_kept, id))
         g_ptr_array_add (coming, g_strdup (id));
     }
@@ -997,10 +1078,43 @@ kept (MlnModel *m)
   MlnNode *trimmed = j != NULL ? known_of (m, j) : NULL;
   GString *out = g_string_new (NULL);
   GPtrArray *closed = closed_list (m);
+  GString *wins = g_string_new (NULL);
+  gboolean envelope;
+
+  /* The floating windows, each trimmed as the main tree is; one left with
+     nothing is not kept. */
+  for (guint i = 0; i < m->floats->len; i++)
+    {
+      Float *f = m->floats->pdata[i];
+      GString *raw = g_string_new (NULL);
+      MlnJson *fj;
+      MlnNode *ft;
+
+      write_node (raw, f->root);
+      fj = mln_json_parse (raw->str);
+      ft = fj != NULL ? known_of (m, fj) : NULL;
+
+      if (ft != NULL)
+        {
+          g_string_append (wins, wins->len > 0 ? ",{\"layout\":" : "{\"layout\":");
+          write_node (wins, ft);
+
+          if (f->w > 0 && f->h > 0)
+            g_string_append_printf (wins, ",\"size\":[%d,%d]", f->w, f->h);
+
+          g_string_append_c (wins, '}');
+        }
+
+      mln_node_unref (ft);
+      mln_json_free (fj);
+      g_string_free (raw, TRUE);
+    }
 
   /* An envelope where there is a version, as mullion keeps one, or a
-     closed list to keep with the tree. */
-  if (m->version != NULL || closed->len > 0)
+     closed list or a floating window to keep with the tree. */
+  envelope = m->version != NULL || closed->len > 0 || wins->len > 0;
+
+  if (envelope)
     {
       g_string_append_c (out, '{');
 
@@ -1021,6 +1135,9 @@ kept (MlnModel *m)
   else
     g_string_append (out, "{\"tabs\":[]}");
 
+  if (wins->len > 0)
+    g_string_append_printf (out, ",\"floating\":[%s]", wins->str);
+
   if (closed->len > 0)
     {
       g_string_append (out, ",\"closed\":[");
@@ -1036,9 +1153,10 @@ kept (MlnModel *m)
       g_string_append_c (out, ']');
     }
 
-  if (m->version != NULL || closed->len > 0)
+  if (envelope)
     g_string_append_c (out, '}');
 
+  g_string_free (wins, TRUE);
   g_ptr_array_free (closed, TRUE);
   mln_node_unref (trimmed);
   mln_json_free (j);
@@ -1047,9 +1165,9 @@ kept (MlnModel *m)
   return g_string_free (out, FALSE);
 }
 
-/* The layout as it stands, as a change is measured: the tree, and the
-   closed list, which can change without it -- a placement, a pane
-   removed. */
+/* The layout as it stands, as a change is measured: the trees, the
+   floating windows' after the main one's, and the closed list, which can
+   change without them -- a placement, a pane removed. */
 static char *
 state (MlnModel *m)
 {
@@ -1062,6 +1180,14 @@ state (MlnModel *m)
   closed = closed_list (m);
   out = g_string_new (NULL);
   write_node (out, m->tree);
+
+  for (guint i = 0; i < m->floats->len; i++)
+    {
+      Float *f = m->floats->pdata[i];
+
+      g_string_append_printf (out, "|%u:%dx%d:", f->id, f->w, f->h);
+      write_node (out, f->root);
+    }
 
   for (guint i = 0; i < closed->len; i++)
     {
@@ -1190,16 +1316,102 @@ set_tree (MlnModel *m, MlnNode *n)
   set_node (&m->tree, n);
 }
 
+/* ---- the trees: the window's, and each floating window's ---- */
+
+static void
+float_free (Float *f)
+{
+  mln_node_unref (f->root);
+  g_free (f);
+}
+
+static Float *
+float_by_id (MlnModel *m, guint id)
+{
+  for (guint i = 0; m->floats != NULL && i < m->floats->len; i++)
+    if (((Float *) m->floats->pdata[i])->id == id)
+      return m->floats->pdata[i];
+
+  return NULL;
+}
+
+/* The floating window a node is in, or NULL for the main tree or none. */
+static Float *
+float_holding (MlnModel *m, MlnNode *node)
+{
+  for (guint i = 0; i < m->floats->len; i++)
+    if (holds (((Float *) m->floats->pdata[i])->root, node))
+      return m->floats->pdata[i];
+
+  return NULL;
+}
+
+/* The leaf a pane is in, in any of the trees. */
+static MlnNode *
+find_leaf (MlnModel *m, const char *id)
+{
+  MlnNode *leaf = leaf_with (m->tree, id);
+
+  for (guint i = 0; leaf == NULL && i < m->floats->len; i++)
+    leaf = leaf_with (((Float *) m->floats->pdata[i])->root, id);
+
+  return leaf;
+}
+
+/* Whether a node is in any of the trees. */
+static gboolean
+in_layout (MlnModel *m, MlnNode *node)
+{
+  return node != NULL && (holds (m->tree, node) || float_holding (m, node) != NULL);
+}
+
+/* Where the tree holding a node is kept: the main tree's, or a floating
+   window's. NULL for a node in none. */
+static MlnNode **
+root_slot (MlnModel *m, MlnNode *node)
+{
+  Float *f;
+
+  if (holds (m->tree, node))
+    return &m->tree;
+
+  f = float_holding (m, node);
+
+  return f != NULL ? &f->root : NULL;
+}
+
+static MlnNode *
+parent_in (MlnModel *m, MlnNode *node)
+{
+  MlnNode **root = root_slot (m, node);
+
+  return root != NULL ? parent_of (*root, node) : NULL;
+}
+
+static void
+drop_float (MlnModel *m, Float *f)
+{
+  g_ptr_array_remove (m->floats, f);
+}
+
 /* A leaf with nothing left in it, taken out of the tree, and the split
    above it collapsed if that leaves it with one child. */
 static void
 empty (MlnModel *m, MlnNode *leaf)
 {
-  MlnNode *up = parent_of (m->tree, leaf);
+  MlnNode **root = root_slot (m, leaf);
+  MlnNode *up = parent_in (m, leaf);
   MlnNode *only, *over;
   GHashTableIter it;
   Spot *s;
   int i;
+
+  /* A floating window with nothing left in it is no window. */
+  if (up == NULL && root != &m->tree && root != NULL)
+    {
+      drop_float (m, float_holding (m, leaf));
+      return;
+    }
 
   if (up == NULL)
     {
@@ -1227,10 +1439,10 @@ empty (MlnModel *m, MlnNode *leaf)
   /* Held across the swap: `up' holds it, and `up' may go. */
   only = mln_node_ref (kid_at (up, 0));
   mln_node_ref (up);
-  over = parent_of (m->tree, up);
+  over = parent_of (*root, up);
 
   if (over == NULL)
-    set_tree (m, only);
+    set_node (root, only);
   else
     replace_kid (over, up, only);
 
@@ -1254,7 +1466,7 @@ empty (MlnModel *m, MlnNode *leaf)
 static void
 drawer (MlnModel *m, const char *id)
 {
-  MlnNode *leaf = leaf_with (m->tree, id);
+  MlnNode *leaf = find_leaf (m, id);
   MlnNode *up;
   int at, was, left;
   char *key;
@@ -1273,7 +1485,7 @@ drawer (MlnModel *m, const char *id)
   left = (int) live_count (m, leaf) - 1;
   leaf->active = MAX (0, MIN (at != -1 && at < was ? was - 1 : was, left));
 
-  up = leaf->tabs->len == 0 ? parent_of (m->tree, leaf) : NULL;
+  up = leaf->tabs->len == 0 ? parent_in (m, leaf) : NULL;
 
   if (up == NULL)
     g_hash_table_remove (m->spot, id);
@@ -1349,13 +1561,43 @@ dismiss (MlnModel *m, const char *id)
 typedef enum { ANYWHERE, AT_END, BEFORE } Place;
 
 /* Into a leaf, as the tab in front of it. */
+/* A pane that has just left the main tree for a floating window: where
+   it was in it -- the home and spot that closing it out of there wrote --
+   kept apart from those, which a move inside the window would overwrite,
+   for when the window docks. */
+static void
+leave_main (MlnModel *m, const char *id)
+{
+  MlnNode *home;
+  Spot *s, *copy;
+
+  home = g_hash_table_lookup (m->home, id);
+  s = g_hash_table_lookup (m->spot, id);
+
+  if (home != NULL)
+    g_hash_table_replace (m->away_home, g_strdup (id), mln_node_ref (home));
+  else
+    g_hash_table_remove (m->away_home, id);
+
+  if (s != NULL)
+    {
+      copy = g_memdup2 (s, sizeof *s);
+      copy->next = mln_node_ref (s->next);
+      copy->slots = g_strdupv (s->slots);
+      g_hash_table_replace (m->away_spot, g_strdup (id), copy);
+    }
+  else
+    g_hash_table_remove (m->away_spot, id);
+}
+
 static void
 into (MlnModel *m, const char *id, MlnNode *leaf, Place place, const char *before)
 {
   char *mine = g_strdup (id);   /* `id' may be a tab this frees */
+  gboolean leaving = leaf_with (m->tree, mine) != NULL && !holds (m->tree, leaf);
   int at;
 
-  if (leaf_with (m->tree, mine) == leaf &&
+  if (find_leaf (m, mine) == leaf &&
       (place == ANYWHERE || live_count (m, leaf) == 1))
     {
       leaf->active = live_index (m, leaf, mine);
@@ -1365,6 +1607,17 @@ into (MlnModel *m, const char *id, MlnNode *leaf, Place place, const char *befor
 
   drawer (m, mine);
   g_hash_table_remove (m->dismissed, mine);
+
+  if (leaving)
+    leave_main (m, mine);
+
+  /* Back in the main tree: where it was there before is no longer where
+     it was. */
+  if (holds (m->tree, leaf))
+    {
+      g_hash_table_remove (m->away_home, mine);
+      g_hash_table_remove (m->away_spot, mine);
+    }
 
   at = place == BEFORE && before != NULL ? tab_index (leaf, before) : -1;
   g_ptr_array_insert (leaf->tabs, at == -1 ? -1 : at, mine);
@@ -1376,16 +1629,21 @@ into (MlnModel *m, const char *id, MlnNode *leaf, Place place, const char *befor
 static void
 beside (MlnModel *m, const char *id, MlnNode *leaf, MlnDir dir, gboolean after)
 {
-  MlnNode *from = leaf_with (m->tree, id);
-  MlnNode *made, *pair, *up;
+  MlnNode *from = find_leaf (m, id);
+  MlnNode *made, *pair, *up, **root;
+  gboolean leaving;
   char *mine;
 
   if (from == leaf && live_count (m, leaf) == 1)
     return;
 
   mine = g_strdup (id);
+  leaving = holds (m->tree, from) && !holds (m->tree, leaf);
   drawer (m, mine);
   g_hash_table_remove (m->dismissed, mine);
+
+  if (leaving)
+    leave_main (m, mine);
 
   made = new_leaf ();
   g_ptr_array_add (made->tabs, mine);
@@ -1394,10 +1652,11 @@ beside (MlnModel *m, const char *id, MlnNode *leaf, MlnDir dir, gboolean after)
   insert_kid (pair, 0, after ? leaf : made, 0.5);
   insert_kid (pair, 1, after ? made : leaf, 0.5);
 
-  up = parent_of (m->tree, leaf);
+  root = root_slot (m, leaf);
+  up = parent_in (m, leaf);
 
   if (up == NULL)
-    set_tree (m, pair);
+    set_node (root, pair);
   else
     replace_kid (up, leaf, pair);
 
@@ -1431,7 +1690,7 @@ reopen (MlnModel *m, const char *id, MlnNode *fallback, MlnNode *avoid)
   Spot *was;
   MlnNode *made, *up;
 
-  if (back != NULL && back != avoid && holds (m->tree, back))
+  if (back != NULL && back != avoid && in_layout (m, back))
     {
       into (m, id, back, ANYWHERE, NULL);
       return back;
@@ -1439,7 +1698,7 @@ reopen (MlnModel *m, const char *id, MlnNode *fallback, MlnNode *avoid)
 
   was = g_hash_table_lookup (m->spot, id);
 
-  if (was == NULL || !holds (m->tree, was->next))
+  if (was == NULL || !in_layout (m, was->next))
     {
       into (m, id, fallback, ANYWHERE, NULL);
       return fallback;
@@ -1456,6 +1715,9 @@ reopen (MlnModel *m, const char *id, MlnNode *fallback, MlnNode *avoid)
       {
         MlnNode *holder = slot_leaf (m->tree, *name);
 
+        for (guint k = 0; holder == NULL && k < m->floats->len; k++)
+          holder = slot_leaf (((Float *) m->floats->pdata[k])->root, *name);
+
         if (holder != NULL && holder != made)
           remove_slot (holder, *name);
 
@@ -1464,7 +1726,7 @@ reopen (MlnModel *m, const char *id, MlnNode *fallback, MlnNode *avoid)
 
     g_strfreev (lent);
   }
-  up = parent_of (m->tree, was->next);
+  up = parent_in (m, was->next);
 
   if (up != NULL && up->dir == was->dir)
     {
@@ -1484,6 +1746,7 @@ reopen (MlnModel *m, const char *id, MlnNode *fallback, MlnNode *avoid)
     {
       MlnNode *pair = new_split (was->dir);
       MlnNode *next = mln_node_ref (was->next);
+      MlnNode **root = root_slot (m, next);
       GHashTableIter it;
       Spot *s;
 
@@ -1493,7 +1756,7 @@ reopen (MlnModel *m, const char *id, MlnNode *fallback, MlnNode *avoid)
                   was->after ? was->share : 1 - was->share);
 
       if (up == NULL)
-        set_tree (m, pair);
+        set_node (root, pair);
       else
         replace_kid (up, next, pair);
 
@@ -1545,7 +1808,17 @@ place_leaf (MlnModel *m, const char *id)
 {
   Placement *p = g_hash_table_lookup (m->placement, id);
 
-  return p == NULL || p->slot == NULL ? NULL : slot_leaf (m->tree, p->slot);
+  MlnNode *leaf;
+
+  if (p == NULL || p->slot == NULL)
+    return NULL;
+
+  leaf = slot_leaf (m->tree, p->slot);
+
+  for (guint i = 0; leaf == NULL && i < m->floats->len; i++)
+    leaf = slot_leaf (((Float *) m->floats->pdata[i])->root, p->slot);
+
+  return leaf;
 }
 
 /* Where a pane the page added goes when the layout has no place for it:
@@ -1554,7 +1827,7 @@ place_leaf (MlnModel *m, const char *id)
 static MlnNode *
 target (MlnModel *m, Pane *p)
 {
-  MlnNode *by = p->near == NULL ? NULL : leaf_with (m->tree, p->near);
+  MlnNode *by = p->near == NULL ? NULL : find_leaf (m, p->near);
 
   if (by != NULL && playable (m, p->near))
     return by;
@@ -1564,7 +1837,7 @@ target (MlnModel *m, Pane *p)
   if (by != NULL)
     return by;
 
-  if (m->focus != NULL && holds (m->tree, m->focus))
+  if (m->focus != NULL && in_layout (m, m->focus))
     return m->focus;
 
   return first_leaf (m->tree);
@@ -1582,7 +1855,7 @@ stray (MlnModel *m)
       Pane *p = m->panes->pdata[i];
 
       if (p->added && !g_hash_table_contains (m->dismissed, p->id) &&
-          !p->off && leaf_with (m->tree, p->id) == NULL)
+          !p->off && find_leaf (m, p->id) == NULL)
         {
           into (m, p->id, target (m, p), ANYWHERE, NULL);
           any = TRUE;
@@ -1606,7 +1879,7 @@ open_missing (MlnModel *m, GHashTable *closed)
       Pane *p = m->panes->pdata[i];
       MlnNode *leaf;
 
-      if (!placed_open (m, p->id) || p->added || leaf_with (m->tree, p->id) != NULL ||
+      if (!placed_open (m, p->id) || p->added || find_leaf (m, p->id) != NULL ||
           (closed != NULL && g_hash_table_contains (closed, p->id)))
         continue;
 
@@ -1658,6 +1931,12 @@ mln_model_new (const MlnModelHooks *hooks, gpointer data)
   m->placement = g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
                                         (GDestroyNotify) placement_free);
   m->closed_kept = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+  m->floats = g_ptr_array_new_with_free_func ((GDestroyNotify) float_free);
+  m->next_float = 1;
+  m->away_home = g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
+                                        (GDestroyNotify) mln_node_unref);
+  m->away_spot = g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
+                                        (GDestroyNotify) spot_free);
   m->defaults = g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
                                        (GDestroyNotify) mln_json_free);
   m->split = 6;
@@ -1681,6 +1960,9 @@ mln_model_free (MlnModel *m)
   g_hash_table_unref (m->was_front);
   g_hash_table_unref (m->placement);
   g_hash_table_unref (m->closed_kept);
+  g_ptr_array_free (m->floats, TRUE);
+  g_hash_table_unref (m->away_home);
+  g_hash_table_unref (m->away_spot);
   g_hash_table_unref (m->defaults);
   g_hash_table_unref (m->by_id);
   g_ptr_array_free (m->panes, TRUE);
@@ -1762,6 +2044,7 @@ mln_model_set_mode (MlnModel *m, const char *mode)
   /* What the last mode's kept layout said was closed is about that
      mode's. */
   g_hash_table_remove_all (m->closed_kept);
+  g_ptr_array_set_size (m->floats, 0);
   set_node (&m->zoom, NULL);
   set_node (&m->focus, NULL);
 }
@@ -1833,7 +2116,7 @@ mln_model_add (MlnModel *m, const char *id, double min, gboolean keep,
     return NULL;
 
   /* A place kept for it, and what is in front there now. */
-  dormant = leaf_with (m->tree, id);
+  dormant = find_leaf (m, id);
 
   if (dormant != NULL)
     {
@@ -1858,7 +2141,7 @@ mln_model_add (MlnModel *m, const char *id, double min, gboolean keep,
       return NULL;
     }
 
-  leaf = leaf_with (m->tree, id);
+  leaf = find_leaf (m, id);
 
   if (leaf == NULL)
     {
@@ -1893,7 +2176,7 @@ mln_model_remove (MlnModel *m, const char *id)
     return FALSE;
 
   mine = g_strdup (id);
-  leaf = leaf_with (m->tree, mine);
+  leaf = find_leaf (m, mine);
   held = leaf != NULL;
   coming = held && later (m, mine);
 
@@ -1905,6 +2188,8 @@ mln_model_remove (MlnModel *m, const char *id)
 
   g_hash_table_remove (m->home, mine);
   g_hash_table_remove (m->spot, mine);
+  g_hash_table_remove (m->away_home, mine);
+  g_hash_table_remove (m->away_spot, mine);
   g_hash_table_remove (m->dismissed, mine);
   g_hash_table_remove (m->by_id, mine);
   g_ptr_array_remove (m->panes, p);
@@ -1961,7 +2246,7 @@ mln_model_set_available (MlnModel *m, const char *id, gboolean ok)
     return;
 
   /* What is in front of its leaf stays in front. */
-  leaf = leaf_with (m->tree, id);
+  leaf = find_leaf (m, id);
 
   if (leaf != NULL)
     front = g_strdup (live_tab (m, leaf, leaf->active));
@@ -2011,7 +2296,7 @@ mln_model_where (MlnModel *m, const char *id)
   if (m->tree == NULL)
     return MLN_WHERE_NONE;
 
-  leaf = leaf_with (m->tree, id);
+  leaf = find_leaf (m, id);
 
   if (leaf == NULL)
     return MLN_WHERE_DRAWER;
@@ -2029,7 +2314,7 @@ mln_model_closed (MlnModel *m)
     {
       Pane *p = m->panes->pdata[i];
 
-      if (!p->off && !p->ephemeral && leaf_with (m->tree, p->id) == NULL)
+      if (!p->off && !p->ephemeral && find_leaf (m, p->id) == NULL)
         g_ptr_array_add (ids, p->id);
     }
 
@@ -2045,8 +2330,12 @@ mln_model_load (MlnModel *m, const char *text)
   gboolean used;
 
   g_hash_table_remove_all (m->closed_kept);
-  saved = text != NULL ? read_kept (m, text, m->closed_kept) : NULL;
+  g_ptr_array_set_size (m->floats, 0);
+  saved = text != NULL ? read_kept (m, text, m->closed_kept, m->floats) : NULL;
   used = saved != NULL;
+
+  for (guint i = 0; i < m->floats->len; i++)
+    ((Float *) m->floats->pdata[i])->id = m->next_float++;
 
   if (saved == NULL)
     saved = fresh (m);
@@ -2099,6 +2388,10 @@ mln_model_set_layout (MlnModel *m, const char *json)
 
   set_node (&m->zoom, NULL);
   set_node (&m->focus, NULL);
+
+  /* The app's layout is the whole of it: floating windows go, and what
+     was in them is where the layout puts it, or closed. */
+  g_ptr_array_set_size (m->floats, 0);
   set_tree (m, made);
   mln_node_unref (made);
   stray (m);
@@ -2119,6 +2412,7 @@ mln_model_reset (MlnModel *m)
 
   set_node (&m->zoom, NULL);
   g_hash_table_remove_all (m->closed_kept);
+  g_ptr_array_set_size (m->floats, 0);
   made = fresh (m);
   set_tree (m, made);
   mln_node_unref (made);
@@ -2158,16 +2452,25 @@ mln_model_settle (MlnModel *m)
   if (m->tree == NULL)
     return;
 
+  /* A zoom is the main tree's: a floating window is as big as it is. */
   if (m->zoom != NULL && (!holds (m->tree, m->zoom) || !alive (m, m->zoom)))
     set_node (&m->zoom, NULL);
 
   /* A leaf that went away takes the focus with it: a split that collapsed
      is not a place to put the next pane into. */
-  if (m->focus != NULL && (!holds (m->tree, m->focus) || !alive (m, m->focus)))
+  if (m->focus != NULL && (!in_layout (m, m->focus) || !alive (m, m->focus)))
     set_node (&m->focus, NULL);
 
   if (alive (m, m->tree))
     settle_node (m, m->tree);
+
+  for (guint i = 0; i < m->floats->len; i++)
+    {
+      Float *f = m->floats->pdata[i];
+
+      if (alive (m, f->root))
+        settle_node (m, f->root);
+    }
 }
 
 /* ---- moving panes, as a person does ---- */
@@ -2190,7 +2493,7 @@ mln_model_drop_tab (MlnModel *m, const char *id, MlnNode *leaf, const char *befo
 {
   char *was;
 
-  if (!playable (m, id) || !holds (m->tree, leaf))
+  if (!playable (m, id) || !in_layout (m, leaf))
     return;
 
   {
@@ -2210,7 +2513,7 @@ mln_model_drop_into (MlnModel *m, const char *id, MlnNode *leaf)
 {
   char *was;
 
-  if (!playable (m, id) || !holds (m->tree, leaf))
+  if (!playable (m, id) || !in_layout (m, leaf))
     return;
 
   {
@@ -2229,7 +2532,7 @@ mln_model_drop_beside (MlnModel *m, const char *id, MlnNode *leaf,
 {
   char *was;
 
-  if (!playable (m, id) || !holds (m->tree, leaf))
+  if (!playable (m, id) || !in_layout (m, leaf))
     return;
 
   {
@@ -2279,7 +2582,7 @@ mln_model_reopen (MlnModel *m, const char *id)
   char *mine = g_strdup (id);
   MlnNode *to;
 
-  if (m->tree == NULL || !playable (m, mine) || leaf_with (m->tree, mine) != NULL)
+  if (m->tree == NULL || !playable (m, mine) || find_leaf (m, mine) != NULL)
     {
       g_free (mine);
       return NULL;
@@ -2287,13 +2590,13 @@ mln_model_reopen (MlnModel *m, const char *id)
 
   to = place_leaf (m, mine);
   to = reopen (m, mine, to != NULL ? to
-                      : m->focus != NULL && holds (m->tree, m->focus)
+                      : m->focus != NULL && in_layout (m, m->focus)
                       ? m->focus : first_leaf (m->tree), NULL);
   unzoom_for (m, to);
   changed (m);
   g_free (mine);
 
-  return holds (m->tree, to) ? to : NULL;
+  return in_layout (m, to) ? to : NULL;
 }
 
 static MlnNode *present (MlnModel *m, const char *id, MlnNode *fallback, MlnNode *avoid);
@@ -2317,17 +2620,17 @@ present (MlnModel *m, const char *id, MlnNode *fallback, MlnNode *avoid)
   if (m->tree == NULL || !playable (m, id))
     return NULL;
 
-  leaf = leaf_with (m->tree, id);
+  leaf = find_leaf (m, id);
 
   if (leaf == NULL)
     {
+      MlnNode *own = place_leaf (m, id);
+
       /* The leaf last focused, which mln_model_settle lets go of once it
          is not drawn; asked again here for an app that has not settled
          since, since a pane put into a leaf that is gone is lost. */
-      MlnNode *own = place_leaf (m, id);
-
-      if (fallback == NULL || !holds (m->tree, fallback))
-        fallback = m->focus != NULL && holds (m->tree, m->focus)
+      if (fallback == NULL || !in_layout (m, fallback))
+        fallback = m->focus != NULL && in_layout (m, m->focus)
           ? m->focus : first_leaf (m->tree);
 
       /* Its slot before whatever leaf the app would have used: that is
@@ -2401,6 +2704,210 @@ mln_model_commit (MlnModel *m)
   changed (m);
 }
 
+/* ---- floating windows ---- */
+
+GArray *
+mln_model_floats (MlnModel *m)
+{
+  GArray *ids = g_array_new (FALSE, FALSE, sizeof (guint));
+
+  for (guint i = 0; i < m->floats->len; i++)
+    g_array_append_val (ids, ((Float *) m->floats->pdata[i])->id);
+
+  return ids;
+}
+
+MlnNode *
+mln_model_float_root (MlnModel *m, guint id)
+{
+  Float *f = float_by_id (m, id);
+
+  return f != NULL ? f->root : NULL;
+}
+
+guint
+mln_model_float_of (MlnModel *m, MlnNode *node)
+{
+  Float *f = node != NULL ? float_holding (m, node) : NULL;
+
+  return f != NULL ? f->id : 0;
+}
+
+gboolean
+mln_model_float_size (MlnModel *m, guint id, int *w, int *h)
+{
+  Float *f = float_by_id (m, id);
+
+  if (f == NULL)
+    return FALSE;
+
+  *w = f->w;
+  *h = f->h;
+
+  return TRUE;
+}
+
+void
+mln_model_set_float_size (MlnModel *m, guint id, int w, int h)
+{
+  Float *f = float_by_id (m, id);
+
+  if (f == NULL || (f->w == w && f->h == h))
+    return;
+
+  f->w = w;
+  f->h = h;
+
+  /* Kept, not told of: a window's size is the person's, and no one else
+     acts on it. */
+  g_free (m->last);
+  m->last = state (m);
+  save (m);
+}
+
+guint
+mln_model_undock (MlnModel *m, const char *id, int w, int h)
+{
+  char *mine;
+  MlnNode *from, *leaf;
+  Float *f;
+  char *was;
+
+  if (m->tree == NULL || !playable (m, id))
+    return 0;
+
+  from = find_leaf (m, id);
+
+  /* Alone in a floating window already: that window. */
+  if (from != NULL && float_holding (m, from) != NULL &&
+      parent_in (m, from) == NULL && live_count (m, from) == 1)
+    return float_holding (m, from)->id;
+
+  mine = g_strdup (id);
+  was = state (m);
+
+  leaf = new_leaf ();
+  f = g_new0 (Float, 1);
+  f->id = m->next_float++;
+  f->root = leaf;
+  f->w = w;
+  f->h = h;
+
+  /* Out of where it was, as a close is, so that it remembers where that
+     was; and apart from those, where it was in the main tree. */
+  {
+    gboolean leaving = from != NULL && holds (m->tree, from);
+
+    drawer (m, mine);
+    g_hash_table_remove (m->dismissed, mine);
+
+    if (leaving)
+      leave_main (m, mine);
+  }
+
+  g_ptr_array_add (m->floats, f);
+  g_ptr_array_add (leaf->tabs, mine);
+  leaf->active = 0;
+
+  set_node (&m->focus, leaf);
+  after_move (m, was);
+
+  return f->id;
+}
+
+/* A pane back into the main tree: where it was in it before it went to a
+   floating window, or where a slot or the focus says. */
+static MlnNode *
+redock (MlnModel *m, const char *id)
+{
+  MlnNode *home = g_hash_table_lookup (m->away_home, id);
+  Spot *s = g_hash_table_lookup (m->away_spot, id);
+
+  if (home != NULL)
+    g_hash_table_replace (m->home, g_strdup (id), mln_node_ref (home));
+  else
+    g_hash_table_remove (m->home, id);
+
+  if (s != NULL)
+    {
+      char *key = NULL;
+
+      /* Moved from one table to the other: its key goes, it does not. */
+      g_hash_table_steal_extended (m->away_spot, id, (gpointer *) &key, NULL);
+      g_free (key);
+      g_hash_table_replace (m->spot, g_strdup (id), s);
+    }
+  else
+    g_hash_table_remove (m->spot, id);
+
+  g_hash_table_remove (m->away_home, id);
+
+  {
+    MlnNode *own = place_leaf (m, id);
+
+    return reopen (m, id, own != NULL && holds (m->tree, own) ? own
+                        : m->focus != NULL && holds (m->tree, m->focus) ? m->focus
+                        : first_leaf (m->tree), NULL);
+  }
+}
+
+static void
+float_tabs (MlnNode *n, GPtrArray *into_)
+{
+  if (n->leaf)
+    {
+      for (guint i = 0; i < n->tabs->len; i++)
+        g_ptr_array_add (into_, g_strdup (n->tabs->pdata[i]));
+
+      return;
+    }
+
+  for (guint i = 0; i < n->kids->len; i++)
+    float_tabs (kid_at (n, i), into_);
+}
+
+void
+mln_model_dock (MlnModel *m, guint id)
+{
+  Float *f = float_by_id (m, id);
+  GPtrArray *ids;
+  char *was;
+
+  if (f == NULL)
+    return;
+
+  was = state (m);
+  ids = g_ptr_array_new_with_free_func (g_free);
+  float_tabs (f->root, ids);
+  drop_float (m, f);
+
+  for (guint i = 0; i < ids->len; i++)
+    redock (m, ids->pdata[i]);
+
+  g_ptr_array_unref (ids);
+  after_move (m, was);
+}
+
+void
+mln_model_dock_pane (MlnModel *m, const char *id)
+{
+  MlnNode *leaf = find_leaf (m, id);
+  char *mine, *was;
+
+  if (leaf == NULL || float_holding (m, leaf) == NULL)
+    return;
+
+  mine = g_strdup (id);
+  was = state (m);
+  drawer (m, mine);
+
+  /* The leaf it went into is the one being worked in, as a present
+     makes it. */
+  set_node (&m->focus, redock (m, mine));
+  after_move (m, was);
+  g_free (mine);
+}
+
 /* ---- asking about the tree ---- */
 
 MlnNode *
@@ -2412,13 +2919,13 @@ mln_model_tree (MlnModel *m)
 MlnNode *
 mln_model_leaf_with (MlnModel *m, const char *id)
 {
-  return leaf_with (m->tree, id);
+  return find_leaf (m, id);
 }
 
 MlnNode *
 mln_model_parent_of (MlnModel *m, MlnNode *node)
 {
-  return parent_of (m->tree, node);
+  return parent_in (m, node);
 }
 
 MlnNode *
@@ -2430,7 +2937,7 @@ mln_model_first_leaf (MlnModel *m)
 gboolean
 mln_model_holds (MlnModel *m, MlnNode *node)
 {
-  return holds (m->tree, node);
+  return in_layout (m, node);
 }
 
 MlnNode *
