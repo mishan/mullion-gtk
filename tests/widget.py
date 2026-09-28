@@ -528,16 +528,28 @@ def corners_over(d, id):
 
 
 def corner_pinned(d):
-    # The pointer over the editor, the focus in it: the inspector's corner
-    # is out of sight until pinned.
-    d.s.move(*map(int, d.centre("editor", "leaf")), window=W)
-    d.settle()
-    check(not corners_over(d, "inspector"),
+    def to_console():
+        # The pointer and the focus in the console, away from the others.
+        d.click(*d.centre("console", "leaf"))
+
+    to_console()
+    check(not corners_over(d, "inspector") and not corners_over(d, "editor"),
           "a corner is out of sight with the pointer and the focus elsewhere")
     d.key("ctrl+p")                     # the demo pins the inspector's
     check(corners_over(d, "inspector"), "and in sight, pinned")
     d.key("ctrl+p")
     check(not corners_over(d, "inspector"), "and out of sight again, let go")
+
+    # The drawing pinned, behind the editor: the pin is the front pane's.
+    d.key("ctrl+shift+p")
+    check(not corners_over(d, "editor"),
+          "a pinned pane behind a tab keeps no corner in sight")
+    d.click(*d.centre("drawing"))
+    to_console()
+    check(corners_over(d, "drawing"), "and in front, it does")
+    d.click(*d.centre("editor"))
+    to_console()
+    check(not corners_over(d, "editor"), "and behind again, it does not")
 
 
 def corner_after_a_window(d):

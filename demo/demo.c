@@ -253,14 +253,25 @@ toggle_header (GSimpleAction *action, GVariant *param, gpointer panes)
            mln_panes_get_header (panes) == MLN_HEADER_CORNER ? "corner" : "strip");
 }
 
-/* The inspector's corner kept in sight, and let go: Ctrl P. */
+/* A pane's corner kept in sight, and let go: Ctrl P for the inspector's,
+   Ctrl Shift P for the drawing's, which starts behind the editor. */
 static void
 toggle_pin (GSimpleAction *action, GVariant *param, gpointer panes)
 {
-  static gboolean pinned;
+  static GHashTable *pinned;
+  const char *id = g_variant_get_string (param, NULL);
+  gboolean on;
 
-  pinned = !pinned;
-  mln_panes_set_corner_pinned (panes, "inspector", pinned);
+  if (pinned == NULL)
+    pinned = g_hash_table_new (g_str_hash, g_str_equal);
+
+  on = !g_hash_table_contains (pinned, id);
+  if (on)
+    g_hash_table_add (pinned, (gpointer) g_intern_string (id));
+  else
+    g_hash_table_remove (pinned, id);
+
+  mln_panes_set_corner_pinned (panes, id, on);
 }
 
 static void
@@ -358,12 +369,14 @@ activate (GtkApplication *app)
     mln_panes_set_window_func (MLN_PANES (panes), make_window, app, NULL);
 
   {
-    GSimpleAction *pin = g_simple_action_new ("pin", NULL);
+    GSimpleAction *pin = g_simple_action_new ("pin", G_VARIANT_TYPE_STRING);
 
     g_signal_connect (pin, "activate", G_CALLBACK (toggle_pin), panes);
     g_action_map_add_action (G_ACTION_MAP (app), G_ACTION (pin));
-    gtk_application_set_accels_for_action (app, "app.pin",
+    gtk_application_set_accels_for_action (app, "app.pin::inspector",
                                            (const char *[]) { "<Control>p", NULL });
+    gtk_application_set_accels_for_action (app, "app.pin::drawing",
+                                           (const char *[]) { "<Control><Shift>p", NULL });
     g_object_unref (pin);
   }
 

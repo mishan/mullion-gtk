@@ -3845,9 +3845,12 @@ mln_panes_set_title (MlnPanes *self, const char *id, const char *title)
 void
 mln_panes_set_icon (MlnPanes *self, const char *id, GIcon *icon)
 {
-  Pane *p = pane_of (self, id);
+  Pane *p;
 
+  g_return_if_fail (MLN_IS_PANES (self));
   g_return_if_fail (icon == NULL || G_IS_ICON (icon));
+
+  p = pane_of (self, id);
 
   if (p == NULL || !g_set_object (&p->icon, icon))
     return;
@@ -3859,7 +3862,12 @@ mln_panes_set_icon (MlnPanes *self, const char *id, GIcon *icon)
 void
 mln_panes_set_corner_pinned (MlnPanes *self, const char *id, gboolean pinned)
 {
-  Pane *p = pane_of (self, id);
+  Pane *p;
+
+  g_return_if_fail (MLN_IS_PANES (self));
+  g_return_if_fail (id != NULL);
+
+  p = pane_of (self, id);
 
   if (p == NULL || p->pinned == !!pinned)
     return;
