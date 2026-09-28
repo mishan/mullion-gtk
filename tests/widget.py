@@ -421,6 +421,28 @@ def floats(d):
     check("window" not in d.geometry()["console"], "the window is gone")
 
 
+def closes_in_a_window(d):
+    # Out into a window of its own, and closed there by its tab's cross:
+    # the window goes with its last pane, and so does the MlnPanes that
+    # drew it, in the middle of the click.
+    x, y = d.centre("console")
+    d.s.click(int(x), int(y), window=W, button=3)
+    time.sleep(0.5)
+    d.key("n")                          # Move to _New Window
+    d.s.wait_window("Console")
+    d.settle()
+    x, y, w, h = d.geometry()["console"]["tab"]
+    d.s.move(int(x + 10), int(y + h / 2), window="Console")
+    time.sleep(0.3)
+    d.s.click(int(x + w - 14), int(y + h / 2), window="Console")     # its cross
+    time.sleep(0.8)
+    check(d.proc.poll() is None, "closing a window's last pane does not take the app down")
+    d.settle()
+    k = d.kept()
+    check("floating" not in k and "closed" in d.geometry()["console"],
+          f"and the pane is closed, in the main window's drawer: {k}")
+
+
 def drag_across(d, src, x1, y1, dst, to):
     """A tab dragged from window `src' to a point `to' in window `dst' (or,
     for dst None, on the screen), as slowly as a drag in one window."""
@@ -625,6 +647,9 @@ for fn in (starts, raises, closes_and_reopens, drags_beside, drags_onto_a_strip,
 # x = 1 - width, off the screen; sway puts it where it goes.
 print("# floats")
 scenario(floats)
+
+print("# closes_in_a_window")
+scenario(closes_in_a_window)
 
 print("# drags_out_and_in")
 scenario(drags_out_and_in)

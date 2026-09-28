@@ -507,6 +507,15 @@ somewhere (MlnPanes *self)
   return leaf != NULL ? leaf : mln_model_first_leaf (self->model);
 }
 
+/* The MlnPanes to go on with after a render: this one, or -- where the
+   render closed the floating window this one drew, which detaches it --
+   the main one. */
+static MlnPanes *
+still_here (MlnPanes *self, MlnPanes *home)
+{
+  return self->model != NULL ? self : home;
+}
+
 /* The MlnPanes a widget is drawn in -- a tab can be in any of them -- or
    `fallback' for one that is in none. */
 static MlnPanes *
@@ -610,8 +619,10 @@ static void
 on_tab_shut (GtkButton *button, gpointer data)
 {
   MlnPanes *self = tab_panes (data, button);
+  MlnPanes *home = main_of (self);
   Pane *p = data;
   MlnNode *leaf = mln_model_leaf_with (self->model, p->id);
+  MlnPanes *at;
 
   char *id = g_strdup (p->id);
 
@@ -624,20 +635,26 @@ on_tab_shut (GtkButton *button, gpointer data)
   if (leaf != NULL && mln_model_holds (self->model, leaf))
     mln_model_set_focus (self->model, leaf);
 
+  /* Held: closing the last pane in a floating window closes the window,
+     which can take the last reference to this one, and detaches it. From
+     there on, the main one. */
+  g_object_ref (self);
   render (self);
+  at = still_here (self, home);
 
   /* Onto its button in the drawer, which is where it went; or, with no
      drawer to reach, onto the front tab of what is left. */
   {
-    GtkWidget *back = reopen_button (self, id);
+    GtkWidget *back = reopen_button (at, id);
 
     if (back != NULL)
       gtk_widget_grab_focus (back);
     else
-      focus_front (self, leaf != NULL && mln_model_holds (self->model, leaf)
-                         ? leaf : somewhere (self));
+      focus_front (at, at == self && leaf != NULL && mln_model_holds (at->model, leaf)
+                       ? leaf : somewhere (at));
   }
 
+  g_object_unref (self);
   g_free (id);
 }
 
@@ -2474,9 +2491,18 @@ chord_is (GtkEventControllerKey *keys, guint keyval, guint code, guint want)
 static void
 done (MlnPanes *self, MlnNode *leaf)
 {
+  MlnPanes *home = main_of (self);
+  MlnPanes *at;
+
+  /* Held: a render that closes this one's window can take the last
+     reference to it. */
+  g_object_ref (self);
   mln_model_set_focus (self->model, leaf);
   render (self);
-  focus_front (self, leaf);
+
+  at = still_here (self, home);
+  focus_front (at, at == self ? leaf : somewhere (home));
+  g_object_unref (self);
 }
 
 /*
