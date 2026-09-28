@@ -9,7 +9,8 @@ mullion keeps.
 
 ![Tabs dragged to split a leaf, to join one, out into a window of their own and back; a pane closed and put back from the drawer](demo/demo.gif)
 
-Work in progress. What is here so far:
+What is here (see [CHANGELOG.md](CHANGELOG.md) for what each release
+brought):
 
 - `src/mln-model.{h,c}`: the layout model, GLib only, ported one function
   to one function from mullion's `src/panes.js`.
