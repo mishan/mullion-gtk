@@ -28,6 +28,10 @@ except ImportError:
     sys.exit(77)
 
 DEMO = os.path.abspath(sys.argv[1])
+
+# The same scenarios on Wayland (a headless sway, shotbox --wayland) when
+# MLN_WAYLAND is set; X11 on Xvfb otherwise.
+WAYLAND = bool(os.environ.get("MLN_WAYLAND"))
 OUT = os.path.join(os.environ.get("MESON_BUILD_ROOT", os.getcwd()), "widget-logs")
 W = "mullion-gtk"
 failures = 0
@@ -87,8 +91,7 @@ class Demo:
         time.sleep(0.1)
         xt.move(x1, y1)
         time.sleep(0.15)
-        xt._fake(xtest.BUTTON_PRESS, 1)
-        xt.sync()
+        self.press(True)
         time.sleep(0.1)
         for i in range(1, 6):
             xt.move(x1 + 3 * i, y1 + 3 * i)
@@ -104,10 +107,16 @@ class Demo:
         if escape:
             self.s.key("Escape")
             time.sleep(0.2)
-        xt._fake(xtest.BUTTON_RELEASE, 1)
-        xt.sync()
+        self.press(False)
         time.sleep(0.4)
         self.settle()
+
+    def press(self, down):
+        if WAYLAND:
+            self.s.xt._button(1, 1 if down else 0)
+        else:
+            self.s.xt._fake(xtest.BUTTON_PRESS if down else xtest.BUTTON_RELEASE, 1)
+        self.s.xt.sync()
 
     def origin(self):
         _, _, _, _, x, y = self.s.wait_window(W)
@@ -130,7 +139,8 @@ def check(ok, what):
 
 def scenario(fn):
     name = fn.__name__
-    with shotbox.Session(size=(1100, 720), env={"GDK_BACKEND": "x11"},
+    with shotbox.Session(size=(1100, 720), wayland=WAYLAND,
+                         env={"GDK_BACKEND": "wayland" if WAYLAND else "x11"},
                          failed=os.path.join(OUT, name + "-failed.png")) as s:
         d = Demo(s, name)
         try:
