@@ -109,6 +109,15 @@ MlnNode    *mln_model_add           (MlnModel *m, const char *id, double min,
                                      gboolean keep, const char *near,
                                      gboolean take, gboolean *added);
 
+/* Where a pane goes when nothing remembers where it was: the leaf with
+   `slot' in its "slots" (NULL: none, or none in the tree), before the
+   leaf last focused. And, if `open', it is put there when a layout is
+   loaded or reset without it, unless the kept layout lists it as closed:
+   a pane new since the layout was kept comes up, and one a person closed
+   stays closed. May be set before the pane is taken on. */
+void        mln_model_set_placement (MlnModel *m, const char *id,
+                                     const char *slot, gboolean open);
+
 /* No longer a pane (mullion's `remove'). TRUE if it was one. */
 gboolean    mln_model_remove        (MlnModel *m, const char *id);
 

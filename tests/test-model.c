@@ -707,6 +707,187 @@ hook_reenters_add (void)
   mln_model_free (m);
 }
 
+
+/* ---- slots and placement ---- */
+
+#define SLOTTED \
+  "{\"dir\":\"row\",\"size\":[1,1],\"kids\":[{\"tabs\":[\"a\"],\"slots\":[\"start\"]}," \
+  "{\"tabs\":[\"b\"],\"slots\":[\"end\"]}]}"
+
+static void
+slots_are_kept (void)
+{
+  Fixture f;
+  char *kept;
+
+  setup (&f, "a b", SLOTTED, FALSE);
+
+  /* Written after the front tab, and only where there are any. */
+  assert_tree (&f, "{\"dir\":\"row\",\"size\":[1,1],\"kids\":["
+                   "{\"tabs\":[\"a\"],\"active\":0,\"slots\":[\"start\"]},"
+                   "{\"tabs\":[\"b\"],\"active\":0,\"slots\":[\"end\"]}]}");
+
+  kept = mln_model_save (f.m);
+  g_assert_true (mln_model_load (f.m, kept));
+  assert_tree (&f, "{\"dir\":\"row\",\"size\":[1,1],\"kids\":["
+                   "{\"tabs\":[\"a\"],\"active\":0,\"slots\":[\"start\"]},"
+                   "{\"tabs\":[\"b\"],\"active\":0,\"slots\":[\"end\"]}]}");
+
+  /* Names only: anything else in the list is not a slot. */
+  g_assert_true (mln_model_load (f.m, "{\"tabs\":[\"a\",\"b\"],\"slots\":[\"x\",3,null,\"x\"]}"));
+  assert_tree (&f, "{\"tabs\":[\"a\",\"b\"],\"active\":0,\"slots\":[\"x\"]}");
+
+  g_free (kept);
+  teardown (&f);
+}
+
+static void
+slots_move_with_the_room (void)
+{
+  Fixture f;
+
+  setup (&f, "a b c", SLOTTED, FALSE);
+  mln_model_set_placement (f.m, "c", "end", FALSE);
+
+  /* b's leaf empties, and a's takes its room and its slot. */
+  mln_model_close (f.m, "b");
+  assert_tree (&f, "{\"tabs\":[\"a\"],\"active\":0,\"slots\":[\"start\",\"end\"]}");
+
+  /* So a pane for the end slot goes there. */
+  mln_model_present (f.m, "c", NULL, NULL);
+  assert_tree (&f, "{\"tabs\":[\"a\",\"c\"],\"active\":1,\"slots\":[\"start\",\"end\"]}");
+  teardown (&f);
+
+  /* A leaf dropped on reading, for holding nothing this page has, hands
+     its slots on the same way: here to the leaf after it. */
+  setup (&f, "a b",
+         "{\"dir\":\"row\",\"size\":[1,1,1],\"kids\":[{\"tabs\":[\"x\"],\"slots\":[\"start\"]},"
+         "{\"tabs\":[\"a\"]},{\"tabs\":[\"b\"],\"slots\":[\"end\"]}]}", FALSE);
+  assert_tree (&f, "{\"dir\":\"row\",\"size\":[1,1],\"kids\":["
+                   "{\"tabs\":[\"a\"],\"active\":0,\"slots\":[\"start\"]},"
+                   "{\"tabs\":[\"b\"],\"active\":0,\"slots\":[\"end\"]}]}");
+  teardown (&f);
+}
+
+static void
+a_slot_before_the_focus (void)
+{
+  Fixture f;
+
+  setup (&f, "a b c", SLOTTED, FALSE);
+  mln_model_set_placement (f.m, "c", "end", FALSE);
+
+  /* c was never in the layout: the drawer, as mullion has it, and not
+     put up, since it is not open by placement. */
+  g_assert_cmpint (mln_model_where (f.m, "c"), ==, MLN_WHERE_DRAWER);
+
+  /* Presented with a's leaf as the fallback, it goes to its slot. */
+  mln_model_present (f.m, "c", mln_model_leaf_with (f.m, "a"), NULL);
+  g_assert_true (mln_model_leaf_with (f.m, "c") == mln_model_leaf_with (f.m, "b"));
+
+  /* Once it has been somewhere, that is where it goes back to. */
+  mln_model_drop_into (f.m, "c", mln_model_leaf_with (f.m, "a"));
+  mln_model_close (f.m, "c");
+  mln_model_present (f.m, "c", NULL, NULL);
+  g_assert_true (mln_model_leaf_with (f.m, "c") == mln_model_leaf_with (f.m, "a"));
+
+  /* A slot that is the leaf to avoid is not used. */
+  mln_model_close (f.m, "c");
+  mln_model_set_placement (f.m, "c", "start", FALSE);
+  mln_model_remove (f.m, "c");
+  mln_model_register (f.m, "c", 100);
+  mln_model_present (f.m, "c", mln_model_leaf_with (f.m, "b"),
+                     mln_model_leaf_with (f.m, "a"));
+  g_assert_true (mln_model_leaf_with (f.m, "c") == mln_model_leaf_with (f.m, "b"));
+  teardown (&f);
+}
+
+static void
+open_where_missing (void)
+{
+  Fixture f;
+
+  setup (&f, "a b c", SLOTTED, FALSE);
+  mln_model_set_placement (f.m, "c", "end", TRUE);
+
+  /* A kept layout from before c: c comes up, at the end of its slot's
+     strip, behind what is in front there. */
+  g_assert_true (mln_model_load (f.m, "{\"dir\":\"row\",\"size\":[1,1],\"kids\":"
+                                      "[{\"tabs\":[\"a\"]},{\"tabs\":[\"b\"],\"slots\":[\"end\"]}]}"));
+  assert_tree (&f, "{\"dir\":\"row\",\"size\":[1,1],\"kids\":["
+                   "{\"tabs\":[\"a\"],\"active\":0},"
+                   "{\"tabs\":[\"b\",\"c\"],\"active\":0,\"slots\":[\"end\"]}]}");
+
+  /* Nothing to say it was put away, so no envelope. */
+  g_assert_cmpstr (f.h.kept, ==, "{\"dir\":\"row\",\"size\":[1,1],\"kids\":["
+                   "{\"tabs\":[\"a\"],\"active\":0},"
+                   "{\"tabs\":[\"b\",\"c\"],\"active\":0,\"slots\":[\"end\"]}]}");
+
+  /* Closed by a person: kept as closed, and so it stays closed. */
+  mln_model_close (f.m, "c");
+  g_assert_cmpstr (f.h.kept, ==, "{\"layout\":{\"dir\":\"row\",\"size\":[1,1],\"kids\":["
+                   "{\"tabs\":[\"a\"],\"active\":0},"
+                   "{\"tabs\":[\"b\"],\"active\":0,\"slots\":[\"end\"]}]},\"closed\":[\"c\"]}");
+
+  {
+    char *kept = g_strdup (f.h.kept);
+
+    g_assert_true (mln_model_load (f.m, kept));
+    g_assert_cmpint (mln_model_where (f.m, "c"), ==, MLN_WHERE_DRAWER);
+    g_free (kept);
+  }
+
+  /* Reset forgets that: the default, and c open in it. */
+  mln_model_reset (f.m);
+  g_assert_cmpint (mln_model_where (f.m, "c"), ==, MLN_WHERE_BEHIND);
+  g_assert_true (mln_model_leaf_with (f.m, "c") == mln_model_leaf_with (f.m, "b"));
+
+  /* No slot in the tree: the first leaf. */
+  mln_model_set_placement (f.m, "c", "nowhere", TRUE);
+  g_assert_true (mln_model_load (f.m, "{\"tabs\":[\"a\",\"b\"],\"active\":1}"));
+  assert_tree (&f, "{\"tabs\":[\"a\",\"b\",\"c\"],\"active\":1}");
+  teardown (&f);
+}
+
+static void
+closed_with_a_version (void)
+{
+  Fixture f;
+
+  setup (&f, "a b c", NULL, FALSE);
+  g_assert_true (mln_model_set_version (f.m, "2"));
+  mln_model_set_placement (f.m, "c", NULL, TRUE);
+  mln_model_close (f.m, "c");
+  g_assert_cmpstr (f.h.kept, ==, "{\"version\":2,\"layout\":{\"tabs\":[\"a\",\"b\"],"
+                                 "\"active\":0},\"closed\":[\"c\"]}");
+
+  /* An envelope with a version is no layout for a page without one, and
+     a closed list does not make it one. */
+  g_assert_true (mln_model_set_version (f.m, NULL));
+  g_assert_false (mln_model_load (f.m, "{\"version\":2,\"layout\":{\"tabs\":[\"a\"]},"
+                                        "\"closed\":[\"c\"]}"));
+  teardown (&f);
+}
+
+static void
+closed_panes_to_come (void)
+{
+  Fixture f;
+
+  setup (&f, "a", NULL, FALSE);
+  g_ptr_array_add (f.h.later, g_strdup ("y"));
+  g_ptr_array_add (f.h.later, g_strdup ("x"));
+
+  /* Put away by a person before the app added them this time: kept that
+     way, in an order of its own, while the page still promises them. */
+  g_assert_true (mln_model_load (f.m, "{\"layout\":{\"tabs\":[\"a\"]},\"closed\":[\"y\",\"x\",\"gone\"]}"));
+  mln_model_close (f.m, "a");
+  mln_model_present (f.m, "a", NULL, NULL);
+  g_assert_cmpstr (f.h.kept, ==, "{\"layout\":{\"tabs\":[\"a\"],\"active\":0},"
+                                 "\"closed\":[\"x\",\"y\"]}");
+  teardown (&f);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -735,6 +916,12 @@ main (int argc, char **argv)
   g_test_add_func ("/model/reopen-is-a-change", reopen_is_a_change);
   g_test_add_func ("/model/reopen-clears-was-front", reopen_clears_the_front_kept_for_a_pane_to_come);
   g_test_add_func ("/model/hook-reenters-add", hook_reenters_add);
+  g_test_add_func ("/model/slots-are-kept", slots_are_kept);
+  g_test_add_func ("/model/slots-move-with-the-room", slots_move_with_the_room);
+  g_test_add_func ("/model/a-slot-before-the-focus", a_slot_before_the_focus);
+  g_test_add_func ("/model/open-where-missing", open_where_missing);
+  g_test_add_func ("/model/closed-with-a-version", closed_with_a_version);
+  g_test_add_func ("/model/closed-panes-to-come", closed_panes_to_come);
 
   return g_test_run ();
 }
