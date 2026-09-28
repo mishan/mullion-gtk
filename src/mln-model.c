@@ -1657,9 +1657,16 @@ mln_model_drop_tab (MlnModel *m, const char *id, MlnNode *leaf, const char *befo
   if (!playable (m, id) || !holds (m->tree, leaf))
     return;
 
-  was = snapshot (m);
-  into (m, id, leaf, before == NULL ? AT_END : BEFORE, before);
-  after_move (m, was);
+  {
+    char *mine = g_strdup (id);
+    char *ahead = g_strdup (before);
+
+    was = snapshot (m);
+    into (m, mine, leaf, ahead == NULL ? AT_END : BEFORE, ahead);
+    after_move (m, was);
+    g_free (ahead);
+    g_free (mine);
+  }
 }
 
 void
@@ -1670,9 +1677,14 @@ mln_model_drop_into (MlnModel *m, const char *id, MlnNode *leaf)
   if (!playable (m, id) || !holds (m->tree, leaf))
     return;
 
-  was = snapshot (m);
-  into (m, id, leaf, ANYWHERE, NULL);
-  after_move (m, was);
+  {
+    char *mine = g_strdup (id);
+
+    was = snapshot (m);
+    into (m, mine, leaf, ANYWHERE, NULL);
+    after_move (m, was);
+    g_free (mine);
+  }
 }
 
 void
@@ -1684,20 +1696,32 @@ mln_model_drop_beside (MlnModel *m, const char *id, MlnNode *leaf,
   if (!playable (m, id) || !holds (m->tree, leaf))
     return;
 
-  was = snapshot (m);
-  beside (m, id, leaf, dir, after);
-  after_move (m, was);
+  {
+    char *mine = g_strdup (id);
+
+    was = snapshot (m);
+    beside (m, mine, leaf, dir, after);
+    after_move (m, was);
+    g_free (mine);
+  }
 }
+
+/* The public entry points take an id that may be a leaf's own copy of
+   it -- what mln_model_live_tabs hands out -- and moving the pane frees
+   that copy. So each works on its own. */
 
 gboolean
 mln_model_close (MlnModel *m, const char *id)
 {
-  if (m->tree == NULL || !dismiss (m, id))
-    return FALSE;
+  char *mine = g_strdup (id);
+  gboolean closed = m->tree != NULL && dismiss (m, mine);
 
-  changed (m);
+  if (closed)
+    changed (m);
 
-  return TRUE;
+  g_free (mine);
+
+  return closed;
 }
 
 void
@@ -1710,8 +1734,21 @@ mln_model_raise (MlnModel *m, MlnNode *leaf, guint i)
   changed (m);
 }
 
+static MlnNode *present (MlnModel *m, const char *id, MlnNode *fallback, MlnNode *avoid);
+
 MlnNode *
 mln_model_present (MlnModel *m, const char *id, MlnNode *fallback, MlnNode *avoid)
+{
+  char *mine = g_strdup (id);
+  MlnNode *leaf = present (m, mine, fallback, avoid);
+
+  g_free (mine);
+
+  return leaf;
+}
+
+static MlnNode *
+present (MlnModel *m, const char *id, MlnNode *fallback, MlnNode *avoid)
 {
   MlnNode *leaf;
 

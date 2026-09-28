@@ -589,6 +589,33 @@ stale_focus (void)
   teardown (&f);
 }
 
+static void
+ids_from_the_tree (void)
+{
+  Fixture f;
+  GPtrArray *live;
+
+  /* The ids mln_model_live_tabs hands out are the leaf's own, and closing
+     or moving the pane frees them: every entry point has to cope. */
+  setup (&f, "a b c", "{\"tabs\":[\"a\",\"b\",\"c\"]}", FALSE);
+
+  live = mln_model_live_tabs (f.m, mln_model_tree (f.m));
+  g_assert_true (mln_model_close (f.m, live->pdata[0]));
+  g_ptr_array_unref (live);
+
+  live = mln_model_live_tabs (f.m, mln_model_tree (f.m));
+  mln_model_drop_beside (f.m, live->pdata[0], mln_model_tree (f.m), MLN_ROW, TRUE);
+  g_ptr_array_unref (live);
+
+  live = mln_model_live_tabs (f.m, mln_model_leaf_with (f.m, "c"));
+  mln_model_drop_tab (f.m, live->pdata[0], mln_model_leaf_with (f.m, "b"),
+                      live->len > 1 ? live->pdata[1] : NULL);
+  g_ptr_array_unref (live);
+
+  assert_tree (&f, "{\"tabs\":[\"b\",\"c\"],\"active\":1}");
+  teardown (&f);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -612,6 +639,7 @@ main (int argc, char **argv)
   g_test_add_func ("/model/sizes", sizes);
   g_test_add_func ("/model/zoom", zoom);
   g_test_add_func ("/model/stale-focus", stale_focus);
+  g_test_add_func ("/model/ids-from-the-tree", ids_from_the_tree);
 
   return g_test_run ();
 }

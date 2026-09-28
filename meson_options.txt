@@ -1,0 +1,2 @@
+option('shotbox', type: 'string', value: '',
+       description: 'A shotbox checkout, for the widget tests (skipped without one)')

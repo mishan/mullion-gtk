@@ -25,6 +25,7 @@
 #include "mln-panes.h"
 #include "mln-model.h"
 
+#include <math.h>
 #include <string.h>
 
 /* ---- a pane's host: its region, with the app's widget in it ---- */
@@ -157,6 +158,14 @@ static const char *STYLE =
   "  border-bottom: 1px solid alpha(@borders, 0.8);"
   "}"
   "panes > .panedrawer > label { opacity: 0.7; }"
+  "panes > panedrop {"
+  "  background-color: alpha(@theme_selected_bg_color, 0.18);"
+  "  border: 2px solid alpha(@theme_selected_bg_color, 0.8);"
+  "}"
+  "panes > panedrop.slot {"
+  "  background-color: @theme_selected_bg_color;"
+  "  border: none;"
+  "}"
   "panes > .panedrawer > button.paneclosed { padding: 1px 8px; min-height: 22px; }";
 
 /* Between the theme (200) and the settings and the app (400, 600). */
@@ -203,12 +212,38 @@ typedef struct
   gboolean shown;               /* what pane-shown last said */
 } Pane;
 
-/* A strip drawn for a leaf, and the node it was drawn for. */
+typedef struct { int x, y, w, h; } Box;
+
+/* A strip drawn for a leaf, and the node it was drawn for, and where the
+   leaf was last put: what a drop and a direction are measured against. */
 typedef struct
 {
   MlnNode *leaf;
   GtkWidget *strip;
+  Box box;                      /* the whole leaf, strip and pane */
+  int strip_h;
 } Strip;
+
+/* Where a dragged tab would land if it were let go (mullion's `under'). */
+typedef enum
+{
+  DROP_NONE,
+  DROP_TAB,                     /* onto a strip, before `before' */
+  DROP_INTO,                    /* into a leaf, in front */
+  DROP_BESIDE,                  /* off a leaf's edge, a split */
+  DROP_DRAWER,                  /* closed */
+} DropKind;
+
+typedef struct
+{
+  DropKind kind;
+  MlnNode *leaf;                /* not a reference: good until the next render */
+  char *before;
+  MlnDir dir;
+  gboolean after;               /* the side in the tree */
+  gboolean far;                 /* the side on the screen */
+  Box hint;
+} Drop;
 
 /* A divider between two live children of a split. */
 typedef struct
@@ -244,6 +279,13 @@ struct _MlnPanes
   GDestroyNotify later_destroy;
 
   guint render_idle;
+
+  /* A tab being dragged: which, whether it has passed the threshold,
+     where it would land, and the widget that shows where. */
+  char *drag_id;
+  gboolean dragging;
+  Drop drop;
+  GtkWidget *hint;
 };
 
 G_DEFINE_FINAL_TYPE (MlnPanes, mln_panes, GTK_TYPE_WIDGET)
@@ -272,6 +314,11 @@ enum
 static guint signals[N_SIGNALS];
 
 static void render (MlnPanes *self);
+static void on_tab_drag_begin (GtkGestureDrag *g, double x, double y, gpointer data);
+static void on_tab_drag_update (GtkGestureDrag *g, double x, double y, gpointer data);
+static void on_tab_drag_end (GtkGestureDrag *g, double x, double y, gpointer data);
+static gboolean on_tab_key (GtkEventControllerKey *keys, guint keyval, guint code,
+                            GdkModifierType state, gpointer data);
 
 static Pane *
 pane_of (MlnPanes *self, const char *id)
@@ -331,6 +378,9 @@ on_tab_pressed (GtkGestureClick *click, int n, double x, double y, gpointer data
 
   g_ptr_array_unref (live);
   render (self);
+
+  /* A tab clicked is a tab the person is on. */
+  gtk_widget_grab_focus (p->tab);
 }
 
 static void
@@ -388,8 +438,26 @@ make_tab (MlnPanes *self, Pane *p)
 
   g_object_set_data (G_OBJECT (click), "mln-panes", self);
   gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (click), GDK_BUTTON_PRIMARY);
-  g_signal_connect (click, "pressed", G_CALLBACK (on_tab_pressed), p);
+  /* Raised on release, and not after a drag: a click, not a press, as a
+     tab that starts a drag has not been chosen. */
+  g_signal_connect (click, "released", G_CALLBACK (on_tab_pressed), p);
   gtk_widget_add_controller (tab, GTK_EVENT_CONTROLLER (click));
+
+  {
+    GtkGesture *drag = gtk_gesture_drag_new ();
+    GtkEventController *keys = gtk_event_controller_key_new ();
+
+    g_object_set_data (G_OBJECT (drag), "mln-panes", self);
+    gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (drag), GDK_BUTTON_PRIMARY);
+    g_signal_connect (drag, "drag-begin", G_CALLBACK (on_tab_drag_begin), p);
+    g_signal_connect (drag, "drag-update", G_CALLBACK (on_tab_drag_update), p);
+    g_signal_connect (drag, "drag-end", G_CALLBACK (on_tab_drag_end), p);
+    gtk_widget_add_controller (tab, GTK_EVENT_CONTROLLER (drag));
+
+    g_object_set_data (G_OBJECT (keys), "mln-panes", self);
+    g_signal_connect (keys, "key-pressed", G_CALLBACK (on_tab_key), p);
+    gtk_widget_add_controller (tab, keys);
+  }
 
   return g_object_ref_sink (tab);
 }
@@ -453,12 +521,29 @@ row_of (MlnNode *split)
   return mln_node_dir (split) == MLN_ROW;
 }
 
+/* Where the pointer is along the divider's axis, in MlnPanes' own
+   coordinates: the divider moves under the pointer as it is dragged, and
+   an offset measured from the divider shrinks by as much as it moves. */
+static double
+divider_axis (Divider *d, double x, double y)
+{
+  MlnPanes *self = g_object_get_data (G_OBJECT (d->bar), "mln-panes");
+  graphene_point_t at;
+
+  if (!gtk_widget_compute_point (d->bar, GTK_WIDGET (self),
+                                 &GRAPHENE_POINT_INIT (x, y), &at))
+    return 0;
+
+  return row_of (d->split) ? at.x : at.y;
+}
+
 static void
 on_divider_begin (GtkGestureDrag *drag, double x, double y, gpointer data)
 {
   Divider *d = data;
 
   d->moved = FALSE;
+  d->from = divider_axis (d, x, y);
   d->start = g_array_index ((GArray *) g_object_get_data (G_OBJECT (d->bar), "mln-sides"),
                             double, 0);
 }
@@ -469,8 +554,11 @@ on_divider_update (GtkGestureDrag *drag, double dx, double dy, gpointer data)
   Divider *d = data;
   MlnPanes *self = g_object_get_data (G_OBJECT (d->bar), "mln-panes");
   GArray *sides = g_object_get_data (G_OBJECT (d->bar), "mln-sides");
-  double delta = row_of (d->split) ? dx : dy;
   double both = g_array_index (sides, double, 1);
+  double sx, sy, delta;
+
+  gtk_gesture_drag_get_start_point (drag, &sx, &sy);
+  delta = divider_axis (d, sx + dx, sy + dy) - d->from;
 
   if (row_of (d->split) && gtk_widget_get_direction (GTK_WIDGET (self)) == GTK_TEXT_DIR_RTL)
     delta = -delta;
@@ -631,6 +719,8 @@ fill_drawer (MlnPanes *self)
 
   if (closed->len > 0)
     gtk_box_append (GTK_BOX (self->drawer), gtk_label_new ("Closed:"));
+  else if (self->dragging && mln_model_closable (self->model, self->drag_id))
+    gtk_box_append (GTK_BOX (self->drawer), gtk_label_new ("Drop here to close"));
 
   for (guint i = 0; i < closed->len; i++)
     {
@@ -647,7 +737,11 @@ fill_drawer (MlnPanes *self)
       g_free (tip);
     }
 
-  gtk_widget_set_child_visible (self->drawer, self->show_drawer && closed->len > 0);
+  gtk_widget_set_child_visible (self->drawer,
+                                self->show_drawer &&
+                                (closed->len > 0 ||
+                                 (self->dragging &&
+                                  mln_model_closable (self->model, self->drag_id))));
   g_ptr_array_unref (closed);
 }
 
@@ -820,9 +914,620 @@ render (MlnPanes *self)
     sync_children (self);
 }
 
-/* ---- laying out ---- */
 
-typedef struct { int x, y, w, h; } Box;
+/* ---- dragging a tab ---- */
+
+static gboolean
+inside (Box b, double x, double y)
+{
+  return x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h;
+}
+
+static gboolean
+rtl (MlnPanes *self)
+{
+  return gtk_widget_get_direction (GTK_WIDGET (self)) == GTK_TEXT_DIR_RTL;
+}
+
+static Box
+bounds_in (MlnPanes *self, GtkWidget *w)
+{
+  graphene_rect_t r;
+
+  if (!gtk_widget_compute_bounds (w, GTK_WIDGET (self), &r))
+    return (Box) { 0, 0, 0, 0 };
+
+  return (Box) { (int) r.origin.x, (int) r.origin.y,
+                 (int) r.size.width, (int) r.size.height };
+}
+
+static Strip *
+strip_at (MlnPanes *self, double x, double y)
+{
+  for (guint i = 0; i < self->strips->len; i++)
+    {
+      Strip *s = self->strips->pdata[i];
+
+      if (gtk_widget_get_child_visible (s->strip) && inside (s->box, x, y))
+        return s;
+    }
+
+  return NULL;
+}
+
+static void
+drop_clear (Drop *d)
+{
+  g_clear_pointer (&d->before, g_free);
+  d->kind = DROP_NONE;
+  d->leaf = NULL;
+}
+
+/* Where a tab let go at (x, y) lands: the drawer, a place in a strip, a
+   leaf's edge, or a leaf. */
+static void
+under (MlnPanes *self, double x, double y, Drop *d)
+{
+  const char *id = self->drag_id;
+  Strip *s;
+  Box box;
+  double fx, fy;
+  gboolean row, has_side = TRUE;
+
+  drop_clear (d);
+
+  if (gtk_widget_get_child_visible (self->drawer) &&
+      inside (bounds_in (self, self->drawer), x, y))
+    {
+      if (mln_model_closable (self->model, id))
+        {
+          d->kind = DROP_DRAWER;
+          d->hint = bounds_in (self, self->drawer);
+        }
+
+      return;
+    }
+
+  if ((s = strip_at (self, x, y)) == NULL)
+    return;
+
+  d->leaf = s->leaf;
+  box = s->box;
+
+  /* Over the strip, which is a row of places: before the first tab whose
+     middle is past the pointer. The tab being dragged is not a place. */
+  if (y < box.y + s->strip_h)
+    {
+      GtkWidget *last = NULL;
+      int at = rtl (self) ? box.x + box.w : box.x;
+
+      d->kind = DROP_TAB;
+
+      for (GtkWidget *t = gtk_widget_get_first_child (s->strip); t != NULL;
+           t = gtk_widget_get_next_sibling (t))
+        {
+          Pane *p = g_object_get_data (G_OBJECT (t), "mln-pane");
+          Box tb = bounds_in (self, t);
+          double mid = tb.x + tb.w / 2.0;
+
+          if (p == NULL || strcmp (p->id, id) == 0)
+            continue;
+
+          if (rtl (self) ? mid < x : mid > x)
+            {
+              d->before = g_strdup (p->id);
+              at = rtl (self) ? tb.x + tb.w : tb.x;
+              break;
+            }
+
+          last = t;
+        }
+
+      if (d->before == NULL && last != NULL)
+        {
+          Box lb = bounds_in (self, last);
+
+          at = rtl (self) ? lb.x : lb.x + lb.w;
+        }
+
+      d->hint = (Box) { at - 1, box.y, 3, s->strip_h };
+      return;
+    }
+
+  fx = (x - box.x) / box.w;
+  fy = (y - box.y) / box.h;
+
+  /* The outer `edge' on each side; the left and right win in corners. */
+  if (fx < self->edge)
+    { row = TRUE; d->far = FALSE; }
+  else if (fx > 1 - self->edge)
+    { row = TRUE; d->far = TRUE; }
+  else if (fy < self->edge)
+    { row = FALSE; d->far = FALSE; }
+  else if (fy > 1 - self->edge)
+    { row = FALSE; d->far = TRUE; }
+  else
+    has_side = FALSE;
+
+  if (!has_side ||
+      !mln_model_splittable (self->model, s->leaf, id, row ? MLN_ROW : MLN_COL,
+                             row ? box.w : box.h))
+    {
+      d->kind = DROP_INTO;
+      d->hint = box;
+      return;
+    }
+
+  d->kind = DROP_BESIDE;
+  d->dir = row ? MLN_ROW : MLN_COL;
+
+  /* `far' is the right or bottom half, which is what is drawn; `after' is
+     which side of the leaf it goes in the tree, the other one for a row in
+     a direction that reads leftward. */
+  d->after = row && rtl (self) ? !d->far : d->far;
+  d->hint = row ? (Box) { d->far ? box.x + box.w / 2 : box.x, box.y, box.w / 2, box.h }
+                : (Box) { box.x, d->far ? box.y + box.h / 2 : box.y, box.w, box.h / 2 };
+}
+
+static void
+show_hint (MlnPanes *self)
+{
+  const char *kind = NULL;
+
+  switch (self->drop.kind)
+    {
+    case DROP_TAB: kind = "slot"; break;
+    case DROP_INTO: kind = "into"; break;
+    case DROP_BESIDE: kind = "beside"; break;
+    case DROP_DRAWER: kind = "drawer"; break;
+    case DROP_NONE: break;
+    }
+
+  gtk_widget_set_css_classes (self->hint, kind != NULL ? (const char *[]) { kind, NULL }
+                                                      : (const char *[]) { NULL });
+  gtk_widget_set_child_visible (self->hint, kind != NULL);
+  gtk_widget_queue_allocate (GTK_WIDGET (self));
+}
+
+static void
+end_drag (MlnPanes *self)
+{
+  gboolean was = self->dragging;
+
+  self->dragging = FALSE;
+  g_clear_pointer (&self->drag_id, g_free);
+  drop_clear (&self->drop);
+  gtk_widget_set_child_visible (self->hint, FALSE);
+  gtk_widget_remove_css_class (GTK_WIDGET (self), "panedrag");
+
+  if (was)
+    fill_drawer (self);
+
+  gtk_widget_queue_resize (GTK_WIDGET (self));
+}
+
+static void
+on_tab_drag_begin (GtkGestureDrag *g, double x, double y, gpointer data)
+{
+  MlnPanes *self = g_object_get_data (G_OBJECT (g), "mln-panes");
+  Pane *p = data;
+
+  g_free (self->drag_id);
+  self->drag_id = g_strdup (p->id);
+  self->dragging = FALSE;
+}
+
+static void
+on_tab_drag_update (GtkGestureDrag *g, double ox, double oy, gpointer data)
+{
+  MlnPanes *self = g_object_get_data (G_OBJECT (g), "mln-panes");
+  Pane *p = data;
+  graphene_point_t at;
+  double sx, sy;
+
+  if (self->drag_id == NULL || strcmp (self->drag_id, p->id) != 0)
+    return;
+
+  /* Five pixels before it is a drag and not a press. */
+  if (!self->dragging)
+    {
+      if (ox * ox + oy * oy < 25)
+        return;
+
+      self->dragging = TRUE;
+      gtk_widget_add_css_class (GTK_WIDGET (self), "panedrag");
+
+      /* Last, so it is drawn over everything. */
+      gtk_widget_insert_before (self->hint, GTK_WIDGET (self), NULL);
+      fill_drawer (self);
+      gtk_widget_queue_resize (GTK_WIDGET (self));
+    }
+
+  gtk_gesture_drag_get_start_point (g, &sx, &sy);
+
+  if (!gtk_widget_compute_point (p->tab, GTK_WIDGET (self),
+                                 &GRAPHENE_POINT_INIT (sx + ox, sy + oy), &at))
+    return;
+
+  under (self, at.x, at.y, &self->drop);
+  show_hint (self);
+}
+
+typedef struct
+{
+  MlnPanes *self;
+  char *id;
+  Drop drop;
+} Landing;
+
+/* The move, after the gesture that asked for it has finished: it can take
+   the tab being dragged out of its strip, and a widget unparented under
+   its own gesture's handler is a gesture left half done. */
+static gboolean
+land (gpointer data)
+{
+  Landing *l = data;
+  MlnPanes *self = l->self;
+  MlnNode *leaf = l->drop.leaf;
+
+  if (mln_model_has (self->model, l->id) && (leaf == NULL || mln_model_holds (self->model, leaf)))
+    {
+      switch (l->drop.kind)
+        {
+        case DROP_DRAWER:
+          mln_model_close (self->model, l->id);
+          break;
+        case DROP_TAB:
+          mln_model_drop_tab (self->model, l->id, leaf, l->drop.before);
+          break;
+        case DROP_INTO:
+          mln_model_drop_into (self->model, l->id, leaf);
+          break;
+        case DROP_BESIDE:
+          mln_model_drop_beside (self->model, l->id, leaf, l->drop.dir, l->drop.after);
+          break;
+        case DROP_NONE:
+          break;
+        }
+
+      leaf = mln_model_leaf_with (self->model, l->id);
+
+      if (leaf != NULL)
+        {
+          MlnNode *zoom = mln_model_get_zoom (self->model);
+
+          mln_model_set_focus (self->model, leaf);
+
+          if (zoom != NULL && zoom != leaf)
+            mln_model_set_zoom (self->model, NULL);
+        }
+
+      render (self);
+
+      if (leaf != NULL)
+        gtk_widget_grab_focus (pane_of (self, l->id)->tab);
+    }
+
+  mln_node_unref (l->drop.leaf);
+  drop_clear (&l->drop);
+  g_free (l->id);
+  g_object_unref (self);
+  g_free (l);
+
+  return G_SOURCE_REMOVE;
+}
+
+static void
+on_tab_drag_end (GtkGestureDrag *g, double ox, double oy, gpointer data)
+{
+  MlnPanes *self = g_object_get_data (G_OBJECT (g), "mln-panes");
+  Landing *l;
+
+  if (!self->dragging || self->drop.kind == DROP_NONE)
+    {
+      end_drag (self);
+      return;
+    }
+
+  l = g_new0 (Landing, 1);
+  l->self = g_object_ref (self);
+  l->id = g_strdup (self->drag_id);
+  l->drop = self->drop;
+  l->drop.before = g_strdup (self->drop.before);
+  mln_node_ref (l->drop.leaf);
+  end_drag (self);
+  g_idle_add (land, l);
+}
+
+/* ---- the keys ---- */
+
+static void
+focus_front (MlnPanes *self, MlnNode *leaf)
+{
+  GPtrArray *live;
+  guint active;
+
+  if (leaf == NULL || !mln_model_holds (self->model, leaf))
+    return;
+
+  live = mln_model_live_tabs (self->model, leaf);
+  active = mln_node_active (leaf);
+
+  if (active < live->len)
+    gtk_widget_grab_focus (pane_of (self, live->pdata[active])->tab);
+
+  g_ptr_array_unref (live);
+}
+
+/* Along a strip: moving the focus moves the tab, which is what a tablist
+   does when what a tab shows costs nothing to show. */
+static gboolean
+on_tab_key (GtkEventControllerKey *keys, guint keyval, guint code,
+            GdkModifierType state, gpointer data)
+{
+  MlnPanes *self = g_object_get_data (G_OBJECT (keys), "mln-panes");
+  Pane *p = data;
+  MlnNode *leaf = mln_model_leaf_with (self->model, p->id);
+  GPtrArray *live;
+  int at = -1, to, n;
+
+  if (leaf == NULL || (state & (GDK_ALT_MASK | GDK_CONTROL_MASK | GDK_SHIFT_MASK |
+                                GDK_SUPER_MASK | GDK_META_MASK)))
+    return FALSE;
+
+  live = mln_model_live_tabs (self->model, leaf);
+  n = (int) live->len;
+
+  for (int i = 0; i < n; i++)
+    if (strcmp (live->pdata[i], p->id) == 0)
+      at = i;
+
+  switch (keyval)
+    {
+    case GDK_KEY_Left:  to = rtl (self) ? at + 1 : at - 1; break;
+    case GDK_KEY_Right: to = rtl (self) ? at - 1 : at + 1; break;
+    case GDK_KEY_Home:  to = 0; break;
+    case GDK_KEY_End:   to = n - 1; break;
+    case GDK_KEY_Return: case GDK_KEY_KP_Enter: case GDK_KEY_space: to = at; break;
+    default:
+      g_ptr_array_unref (live);
+      return FALSE;
+    }
+
+  to = (to % n + n) % n;
+  mln_model_set_focus (self->model, leaf);
+  mln_model_raise (self->model, leaf, (guint) to);
+  render (self);
+  gtk_widget_grab_focus (pane_of (self, live->pdata[to])->tab);
+  g_ptr_array_unref (live);
+
+  return TRUE;
+}
+
+/* The leaf a command is about: the one the focus is in, or the one last
+   pressed in, or the first there is. */
+static MlnNode *
+current (MlnPanes *self)
+{
+  GtkRoot *root = gtk_widget_get_root (GTK_WIDGET (self));
+  GtkWidget *at = root != NULL ? gtk_root_get_focus (root) : NULL;
+  MlnNode *focus = mln_model_get_focus (self->model);
+
+  for (; at != NULL && at != GTK_WIDGET (self); at = gtk_widget_get_parent (at))
+    {
+      Pane *p = g_object_get_data (G_OBJECT (at), "mln-pane");
+
+      if (p != NULL)
+        return mln_model_leaf_with (self->model, p->id);
+
+      for (guint i = 0; i < self->strips->len; i++)
+        if (((Strip *) self->strips->pdata[i])->strip == at)
+          return ((Strip *) self->strips->pdata[i])->leaf;
+    }
+
+  if (focus != NULL && strip_for (self, focus) != NULL)
+    return focus;
+
+  return mln_model_first_leaf (self->model);
+}
+
+/* The leaf that way: of the ones whose middle lies in the direction the
+   arrow points, inside a 45 degree cone, the nearest. */
+static MlnNode *
+toward (MlnPanes *self, MlnNode *leaf, int dx, int dy)
+{
+  Strip *here = strip_for (self, leaf);
+  MlnNode *best = NULL;
+  double cx, cy, near = G_MAXDOUBLE;
+
+  if (mln_model_get_zoom (self->model) != NULL || here == NULL)
+    return NULL;
+
+  cx = here->box.x + here->box.w / 2.0;
+  cy = here->box.y + here->box.h / 2.0;
+
+  for (guint i = 0; i < self->strips->len; i++)
+    {
+      Strip *s = self->strips->pdata[i];
+      double x = s->box.x + s->box.w / 2.0 - cx;
+      double y = s->box.y + s->box.h / 2.0 - cy;
+
+      if (s->leaf == leaf)
+        continue;
+
+      if (dx != 0 && ((x > 0 ? 1 : x < 0 ? -1 : 0) != dx || fabs (x) < fabs (y)))
+        continue;
+
+      if (dy != 0 && ((y > 0 ? 1 : y < 0 ? -1 : 0) != dy || fabs (y) < fabs (x)))
+        continue;
+
+      if (hypot (x, y) < near)
+        {
+          near = hypot (x, y);
+          best = s->leaf;
+        }
+    }
+
+  return best;
+}
+
+static gboolean
+editing (GtkWidget *w)
+{
+  for (; w != NULL; w = gtk_widget_get_parent (w))
+    if (GTK_IS_EDITABLE (w) || GTK_IS_TEXT_VIEW (w))
+      return TRUE;
+
+  return FALSE;
+}
+
+static void
+done (MlnPanes *self, MlnNode *leaf)
+{
+  mln_model_set_focus (self->model, leaf);
+  render (self);
+  focus_front (self, leaf);
+}
+
+/*
+ * mullion's chords: Alt with an arrow moves the focus to the leaf that
+ * way, Alt Shift with one moves the pane in front there (or off the edge
+ * into a half of its own); Alt \ and Alt - split the pane in front off
+ * to the right and below; Alt Enter fills the layout with one leaf; Alt
+ * W closes; Alt 0 goes back to the default. Never while the focus is
+ * somewhere text is typed.
+ */
+static gboolean
+on_key (GtkEventControllerKey *keys, guint keyval, guint code,
+        GdkModifierType state, gpointer data)
+{
+  MlnPanes *self = data;
+  GtkRoot *root = gtk_widget_get_root (GTK_WIDGET (self));
+  MlnNode *leaf, *to;
+  GPtrArray *live;
+  const char *id;
+  int dx = 0, dy = 0;
+  gboolean shift = (state & GDK_SHIFT_MASK) != 0;
+  gboolean used = TRUE;
+
+  if (self->dragging && keyval == GDK_KEY_Escape)
+    {
+      end_drag (self);
+      return TRUE;
+    }
+
+  if (!(state & GDK_ALT_MASK) ||
+      (state & (GDK_CONTROL_MASK | GDK_SUPER_MASK | GDK_META_MASK)) ||
+      !mln_model_loaded (self->model) ||
+      (root != NULL && editing (gtk_root_get_focus (root))))
+    return FALSE;
+
+  leaf = current (self);
+
+  if (leaf == NULL)
+    return FALSE;
+
+  live = mln_model_live_tabs (self->model, leaf);
+  id = mln_node_active (leaf) < live->len ? live->pdata[mln_node_active (leaf)] : NULL;
+
+  switch (keyval)
+    {
+    case GDK_KEY_Left:  dx = -1; break;
+    case GDK_KEY_Right: dx = 1; break;
+    case GDK_KEY_Up:    dy = -1; break;
+    case GDK_KEY_Down:  dy = 1; break;
+    default: break;
+    }
+
+  if ((dx || dy) && !shift)
+    {
+      if ((to = toward (self, leaf, dx, dy)) != NULL)
+        done (self, to);
+    }
+  else if (dx || dy)
+    {
+      MlnDir dir = dx ? MLN_ROW : MLN_COL;
+      Strip *s = strip_for (self, leaf);
+
+      to = toward (self, leaf, dx, dy);
+
+      if (id == NULL ||
+          (to == NULL && (s == NULL ||
+                          !mln_model_splittable (self->model, leaf, id, dir,
+                                                 dx ? s->box.w : s->box.h))))
+        used = FALSE;
+      else
+        {
+          char *mine = g_strdup (id);
+          MlnNode *zoom;
+
+          if (to != NULL)
+            mln_model_drop_into (self->model, mine, to);
+          else
+            mln_model_drop_beside (self->model, mine, leaf, dir,
+                                   dy > 0 || (dx != 0 && (dx > 0) != rtl (self)));
+
+          to = mln_model_leaf_with (self->model, mine);
+          zoom = mln_model_get_zoom (self->model);
+
+          if (zoom != NULL && zoom != to)
+            mln_model_set_zoom (self->model, NULL);
+
+          done (self, to);
+          g_free (mine);
+        }
+    }
+  else if (keyval == GDK_KEY_backslash || keyval == GDK_KEY_minus)
+    {
+      /* The pane in front, off into a half of its own; in a leaf with
+         nothing else in it, the first pane in the drawer there instead. */
+      MlnDir dir = keyval == GDK_KEY_backslash ? MLN_ROW : MLN_COL;
+      GPtrArray *closed = mln_model_closed (self->model);
+      char *moving = g_strdup (live->len > 1 ? id
+                               : closed->len > 0 ? closed->pdata[0] : NULL);
+      Strip *s = strip_for (self, leaf);
+
+      if (moving == NULL || s == NULL ||
+          !mln_model_splittable (self->model, leaf, moving, dir,
+                                 dir == MLN_ROW ? s->box.w : s->box.h))
+        used = FALSE;
+      else
+        {
+          mln_model_drop_beside (self->model, moving, leaf, dir, TRUE);
+          done (self, leaf);
+        }
+
+      g_free (moving);
+      g_ptr_array_unref (closed);
+    }
+  else if (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter)
+    {
+      mln_model_set_zoom (self->model, mln_model_get_zoom (self->model) == NULL ? leaf : NULL);
+      render (self);
+      focus_front (self, leaf);
+    }
+  else if ((keyval == GDK_KEY_w || keyval == GDK_KEY_W) && id != NULL)
+    {
+      /* Onto a leaf still in the tree: this one if it kept anything. */
+      if (mln_model_close (self->model, id))
+        done (self, mln_model_holds (self->model, leaf) ? leaf
+                                                       : mln_model_first_leaf (self->model));
+    }
+  else if (keyval == GDK_KEY_0)
+    {
+      mln_model_reset (self->model);
+      render (self);
+      focus_front (self, mln_model_first_leaf (self->model));
+    }
+  else
+    used = FALSE;
+
+  g_ptr_array_unref (live);
+
+  return used;
+}
+
+/* ---- laying out ---- */
 
 static int
 strip_height (MlnPanes *self, Strip *s)
@@ -858,6 +1563,8 @@ allocate_leaf (MlnPanes *self, MlnNode *leaf, Box box)
 
       gtk_widget_measure (s->strip, GTK_ORIENTATION_HORIZONTAL, -1, &mw, NULL, NULL, NULL);
       place (s->strip, (Box) { box.x, box.y, MAX (box.w, mw), sh });
+      s->box = box;
+      s->strip_h = sh;
     }
 
   if (active < live->len)
@@ -1067,6 +1774,9 @@ mln_panes_size_allocate (GtkWidget *w, int width, int height, int baseline)
   if (gtk_widget_get_child_visible (self->drawer))
     place (self->drawer, (Box) { 0, 0, width, top });
 
+  if (gtk_widget_get_child_visible (self->hint))
+    place (self->hint, self->drop.hint);
+
   if (tree == NULL || !mln_model_alive (self->model, tree))
     {
       place (self->blank, box);
@@ -1118,6 +1828,9 @@ mln_panes_dispose (GObject *o)
 
   g_clear_pointer (&self->drawer, gtk_widget_unparent);
   g_clear_pointer (&self->blank, gtk_widget_unparent);
+  g_clear_pointer (&self->hint, gtk_widget_unparent);
+  g_clear_pointer (&self->drag_id, g_free);
+  drop_clear (&self->drop);
 
   if (self->later_destroy != NULL)
     self->later_destroy (self->later_data);
@@ -1295,6 +2008,18 @@ mln_panes_init (MlnPanes *self)
   gtk_widget_set_parent (self->drawer, GTK_WIDGET (self));
   gtk_widget_set_child_visible (self->drawer, FALSE);
 
+  self->hint = g_object_new (GTK_TYPE_BOX, "css-name", "panedrop", "can-target", FALSE, NULL);
+  gtk_widget_set_parent (self->hint, GTK_WIDGET (self));
+  gtk_widget_set_child_visible (self->hint, FALSE);
+
+  {
+    GtkEventController *keys = gtk_event_controller_key_new ();
+
+    gtk_event_controller_set_propagation_phase (keys, GTK_PHASE_CAPTURE);
+    g_signal_connect (keys, "key-pressed", G_CALLBACK (on_key), self);
+    gtk_widget_add_controller (GTK_WIDGET (self), keys);
+  }
+
   self->blank = gtk_label_new ("Every pane is closed. Reopen one from the row above.");
   gtk_widget_add_css_class (self->blank, "dim-label");
   gtk_widget_set_parent (self->blank, GTK_WIDGET (self));
@@ -1319,9 +2044,11 @@ take_on (MlnPanes *self, const char *id, const char *title, GtkWidget *content)
   p->id = g_strdup (id);
   p->title = g_strdup (title != NULL ? title : id);
   p->host = mln_host_new (content);
+  g_object_set_data (G_OBJECT (p->host), "mln-pane", p);
   gtk_widget_set_parent (p->host, GTK_WIDGET (self));
   gtk_widget_set_child_visible (p->host, FALSE);
   p->tab = make_tab (self, p);
+  g_object_set_data (G_OBJECT (p->tab), "mln-pane", p);
 
   g_hash_table_insert (self->panes, p->id, p);
   g_ptr_array_add (self->order, p);
@@ -1470,6 +2197,30 @@ mln_panes_is_visible (MlnPanes *self, const char *id)
   Pane *p = pane_of (self, id);
 
   return p != NULL && p->shown;
+}
+
+gboolean
+mln_panes_get_tab_bounds (MlnPanes *self, const char *id, graphene_rect_t *bounds)
+{
+  Pane *p = pane_of (self, id);
+
+  return p != NULL && gtk_widget_get_parent (p->tab) != NULL &&
+         gtk_widget_get_child_visible (gtk_widget_get_parent (p->tab)) &&
+         gtk_widget_compute_bounds (p->tab, GTK_WIDGET (self), bounds);
+}
+
+gboolean
+mln_panes_get_leaf_bounds (MlnPanes *self, const char *id, graphene_rect_t *bounds)
+{
+  MlnNode *leaf = mln_model_leaf_with (self->model, id);
+  Strip *s = leaf != NULL ? strip_for (self, leaf) : NULL;
+
+  if (s == NULL || !gtk_widget_get_child_visible (s->strip))
+    return FALSE;
+
+  graphene_rect_init (bounds, s->box.x, s->box.y, s->box.w, s->box.h);
+
+  return TRUE;
 }
 
 char **

@@ -9,6 +9,8 @@
 
 #include "mln-panes.h"
 
+#include <stdio.h>
+
 static const char *LAYOUT =
   "{\"dir\":\"row\",\"size\":[0.62,0.38],\"kids\":["
   "{\"dir\":\"col\",\"size\":[0.7,0.3],\"kids\":["
@@ -40,6 +42,60 @@ static void
 shown (MlnPanes *panes, const char *id, gboolean on, gpointer data)
 {
   g_print ("pane-shown %s %s\n", id, on ? "on" : "off");
+}
+
+static const char *IDS[] = { "editor", "console", "inspector", "drawing" };
+
+/* Where everything is, on one line, once the layout has been drawn: for a
+   harness that clicks and drags, which cannot know the fonts. */
+static char *last_geometry;
+
+static gboolean
+geometry (GtkWidget *widget, GdkFrameClock *clock, gpointer data)
+{
+  MlnPanes *panes = MLN_PANES (widget);
+  GString *out = g_string_new ("geometry {");
+  graphene_rect_t r;
+  double x = 0, y = 0;
+  GtkNative *native = gtk_widget_get_native (GTK_WIDGET (panes));
+  graphene_point_t at;
+
+  /* In the window's coordinates, which is what a harness clicks in. */
+  if (native != NULL &&
+      gtk_widget_compute_point (GTK_WIDGET (panes), GTK_WIDGET (native),
+                                &GRAPHENE_POINT_INIT (0, 0), &at))
+    {
+      x = at.x;
+      y = at.y;
+    }
+
+  for (guint i = 0; i < G_N_ELEMENTS (IDS); i++)
+    {
+      g_string_append_printf (out, "%s\"%s\":{", i ? "," : "", IDS[i]);
+
+      if (mln_panes_get_tab_bounds (panes, IDS[i], &r))
+        g_string_append_printf (out, "\"tab\":[%g,%g,%g,%g]", r.origin.x + x,
+                                r.origin.y + y, r.size.width, r.size.height);
+
+      if (mln_panes_get_leaf_bounds (panes, IDS[i], &r))
+        g_string_append_printf (out, ",\"leaf\":[%g,%g,%g,%g]", r.origin.x + x,
+                                r.origin.y + y, r.size.width, r.size.height);
+
+      g_string_append (out, "}");
+    }
+
+  g_string_append (out, "}");
+
+  if (g_strcmp0 (out->str, last_geometry) != 0)
+    {
+      g_print ("%s\n", out->str);
+      g_free (last_geometry);
+      last_geometry = g_strdup (out->str);
+    }
+
+  g_string_free (out, TRUE);
+
+  return G_SOURCE_CONTINUE;
 }
 
 static void
@@ -79,6 +135,7 @@ activate (GtkApplication *app)
 
   g_signal_connect (panes, "pane-shown", G_CALLBACK (shown), NULL);
   g_signal_connect (panes, "layout-kept", G_CALLBACK (kept), NULL);
+  gtk_widget_add_tick_callback (panes, geometry, NULL, NULL);
 
   mln_panes_set_default (MLN_PANES (panes), "main", LAYOUT);
   mln_panes_set_mode (MLN_PANES (panes), "main");
@@ -96,7 +153,12 @@ activate (GtkApplication *app)
 int
 main (int argc, char **argv)
 {
-  GtkApplication *app = gtk_application_new ("org.example.MullionDemo",
+  GtkApplication *app;
+
+  /* A line at a time, for a harness reading it as it comes. */
+  setvbuf (stdout, NULL, _IOLBF, 0);
+
+  app = gtk_application_new ("org.example.MullionDemo",
                                              G_APPLICATION_DEFAULT_FLAGS);
 
   g_signal_connect (app, "activate", G_CALLBACK (activate), NULL);

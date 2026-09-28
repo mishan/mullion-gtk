@@ -12,5 +12,5 @@ add_project_arguments('-Wno-unused-parameter', '-Wno-missing-field-initializers'
                       language: 'c')
 
 subdir('src')
-subdir('tests')
 subdir('demo')
+subdir('tests')

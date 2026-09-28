@@ -79,6 +79,14 @@ void        mln_panes_close         (MlnPanes *self, const char *id);
 /* Whether it is in front of somebody: what ::pane-shown last said. */
 gboolean    mln_panes_is_visible    (MlnPanes *self, const char *id);
 
+/* Where a pane's tab, and the leaf holding it, are drawn, in this
+   widget's coordinates: for a popover anchored on a tab, and for tests.
+   FALSE for a pane not drawn. */
+gboolean    mln_panes_get_tab_bounds  (MlnPanes *self, const char *id,
+                                       graphene_rect_t *bounds);
+gboolean    mln_panes_get_leaf_bounds (MlnPanes *self, const char *id,
+                                       graphene_rect_t *bounds);
+
 /* The drawer: panes in play that the layout does not hold. */
 char      **mln_panes_get_closed    (MlnPanes *self);
 
