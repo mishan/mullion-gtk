@@ -134,6 +134,11 @@ read_string (Reader *r)
             else if (u >= 0xDC00 && u <= 0xDFFF)
               goto bad;
 
+            /* A NUL would end the string where JavaScript's goes on, and
+               "a\u0000b" would be read as "a": refused instead. */
+            if (u == 0)
+              goto bad;
+
             g_string_append_unichar (s, (gunichar) u);
           }
           break;

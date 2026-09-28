@@ -458,7 +458,10 @@ sane (const MlnJson *n)
     {
       const MlnJson *f = mln_json_index (size, i);
 
-      if (mln_json_type (f) != MLN_JSON_NUMBER || !(mln_json_number (f) > 0))
+      /* Finite, as in mullion: 1e999 reads as Infinity, and an Infinity
+         is written back as null, which does not read back. */
+      if (mln_json_type (f) != MLN_JSON_NUMBER || !isfinite (mln_json_number (f)) ||
+          !(mln_json_number (f) > 0))
         return FALSE;
     }
 
@@ -475,19 +478,28 @@ sane (const MlnJson *n)
 static MlnNode *
 known (MlnModel *m, const MlnJson *n, GHashTable *taken)
 {
-  const MlnJson *tabs = mln_json_member (n, "tabs");
+  const MlnJson *tabs;
+
+  /* A sane tree is what this is written for; a default the app wrote is
+     read through it too (docs/layout.md), and has been through nothing,
+     so whatever is not the shape of a node here is nothing. */
+  if (n == NULL || mln_json_type (n) != MLN_JSON_OBJECT)
+    return NULL;
+
+  tabs = mln_json_member (n, "tabs");
 
   if (tabs != NULL && mln_json_type (tabs) == MLN_JSON_ARRAY)
     {
       MlnNode *leaf = new_leaf ();
       const MlnJson *active = mln_json_member (n, "active");
-      double want = active == NULL ? 0 : mln_json_number (active);
+      double want = active != NULL && mln_json_type (active) == MLN_JSON_NUMBER &&
+                    mln_json_number (active) > 0 ? mln_json_number (active) : 0;
 
       for (guint i = 0; i < mln_json_length (tabs); i++)
         {
           const char *id = mln_json_string (mln_json_index (tabs, i));
 
-          if ((pane (m, id) != NULL || later (m, id)) &&
+          if (id != NULL && (pane (m, id) != NULL || later (m, id)) &&
               !g_hash_table_contains (taken, id))
             {
               g_hash_table_add (taken, g_strdup (id));
@@ -510,9 +522,14 @@ known (MlnModel *m, const MlnJson *n, GHashTable *taken)
   {
     const MlnJson *kids = mln_json_member (n, "kids");
     const MlnJson *size = mln_json_member (n, "size");
-    const char *dir = mln_json_string (mln_json_member (n, "dir"));
-    MlnNode *split = new_split (strcmp (dir, "row") == 0 ? MLN_ROW : MLN_COL);
-    MlnNode *only;
+    const char *dir = kids != NULL ? mln_json_string (mln_json_member (n, "dir")) : NULL;
+    MlnNode *split, *only;
+
+    if (dir == NULL || (strcmp (dir, "row") != 0 && strcmp (dir, "col") != 0) ||
+        mln_json_type (kids) != MLN_JSON_ARRAY)
+      return NULL;
+
+    split = new_split (strcmp (dir, "row") == 0 ? MLN_ROW : MLN_COL);
 
     for (guint i = 0; i < mln_json_length (kids); i++)
       {
@@ -520,7 +537,10 @@ known (MlnModel *m, const MlnJson *n, GHashTable *taken)
 
         if (kept != NULL)
           {
-            double share = mln_json_number (mln_json_index (size, i));
+            /* A share that is not a number is an even one. */
+            const MlnJson *f = size != NULL ? mln_json_index (size, i) : NULL;
+            double share = f != NULL && mln_json_type (f) == MLN_JSON_NUMBER &&
+                           isfinite (mln_json_number (f)) ? mln_json_number (f) : 1;
 
             g_ptr_array_add (split->kids, kept);
             g_array_append_val (split->size, share);
@@ -1234,9 +1254,12 @@ mln_model_set_default (MlnModel *m, const char *mode, const char *json)
       return TRUE;
     }
 
+  /* Read as mullion reads a default: through `known' and nothing else,
+     so a split of one is that one and a share of nothing is kept. What is
+     refused is text that is not a JSON object at all. */
   j = mln_json_parse (json);
 
-  if (!sane (j))
+  if (j == NULL || mln_json_type (j) != MLN_JSON_OBJECT)
     {
       mln_json_free (j);
       return FALSE;
@@ -1346,11 +1369,13 @@ mln_model_add (MlnModel *m, const char *id, double min, gboolean keep,
 
   g_free (front_copy);
 
-  told (m);
+  /* The layout's own state first, and then told: what the app does when
+     it is told can change the tree, and this leaf with it. */
   set_node (&m->focus, leaf);
   unzoom_for (m, leaf);
+  told (m);
 
-  return leaf;
+  return m->focus;
 }
 
 gboolean
@@ -1734,6 +1759,30 @@ mln_model_raise (MlnModel *m, MlnNode *leaf, guint i)
   changed (m);
 }
 
+/* A person's reopen from the drawer (mullion's drawer button): where it
+   was, or into the leaf last focused, or the first; a person's change, so
+   `changed' and not `told', and the focus left where it was. */
+MlnNode *
+mln_model_reopen (MlnModel *m, const char *id)
+{
+  char *mine = g_strdup (id);
+  MlnNode *to;
+
+  if (m->tree == NULL || !playable (m, mine) || leaf_with (m->tree, mine) != NULL)
+    {
+      g_free (mine);
+      return NULL;
+    }
+
+  to = reopen (m, mine, m->focus != NULL && holds (m->tree, m->focus)
+                          ? m->focus : first_leaf (m->tree), NULL);
+  unzoom_for (m, to);
+  changed (m);
+  g_free (mine);
+
+  return holds (m->tree, to) ? to : NULL;
+}
+
 static MlnNode *present (MlnModel *m, const char *id, MlnNode *fallback, MlnNode *avoid);
 
 MlnNode *
@@ -1819,10 +1868,7 @@ mln_model_equalize (MlnModel *m, MlnNode *split)
         live++;
       }
 
-  if (live == 0)
-    return;
-
-  for (guint i = 0; i < split->kids->len; i++)
+  for (guint i = 0; i < split->kids->len && live > 0; i++)
     if (alive (m, kid_at (split, i)))
       g_array_index (split->size, double, i) = total / live;
 

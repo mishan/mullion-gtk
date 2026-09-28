@@ -7,7 +7,7 @@
 /* A window of panes to try mullion-gtk on: an editor, a console, an
    inspector and a drawing, laid out as mullion's README lays them out. */
 
-#include "mln-panes.h"
+#include "mullion-gtk.h"
 
 #include <stdio.h>
 
@@ -71,15 +71,23 @@ geometry (GtkWidget *widget, GdkFrameClock *clock, gpointer data)
 
   for (guint i = 0; i < G_N_ELEMENTS (IDS); i++)
     {
+      const char *sep = "";
+
       g_string_append_printf (out, "%s\"%s\":{", i ? "," : "", IDS[i]);
 
-      if (mln_panes_get_tab_bounds (panes, IDS[i], &r))
-        g_string_append_printf (out, "\"tab\":[%g,%g,%g,%g]", r.origin.x + x,
-                                r.origin.y + y, r.size.width, r.size.height);
+#define PART(name, get)                                                    \
+      if (get (panes, IDS[i], &r))                                          \
+        {                                                                   \
+          g_string_append_printf (out, "%s\"" name "\":[%g,%g,%g,%g]", sep, \
+                                  r.origin.x + x, r.origin.y + y,           \
+                                  r.size.width, r.size.height);             \
+          sep = ",";                                                        \
+        }
 
-      if (mln_panes_get_leaf_bounds (panes, IDS[i], &r))
-        g_string_append_printf (out, ",\"leaf\":[%g,%g,%g,%g]", r.origin.x + x,
-                                r.origin.y + y, r.size.width, r.size.height);
+      PART ("tab", mln_panes_get_tab_bounds)
+      PART ("leaf", mln_panes_get_leaf_bounds)
+      PART ("closed", mln_panes_get_closed_bounds)
+#undef PART
 
       g_string_append (out, "}");
     }
@@ -115,13 +123,48 @@ dump (gpointer data)
 }
 G_GNUC_END_IGNORE_DEPRECATIONS
 
+/* Which widget has the keyboard, for a harness that cannot see it: a tab
+   by its title, anything else by its type. */
+static void
+focus_moved (GtkWindow *win, GParamSpec *spec, gpointer data)
+{
+  GtkWidget *w = gtk_window_get_focus (win);
+
+  if (w == NULL)
+    g_print ("focus none\n");
+  else if (g_strcmp0 (gtk_widget_get_css_name (w), "tab") == 0)
+    g_print ("focus tab %s\n",
+             gtk_label_get_text (GTK_LABEL (gtk_widget_get_first_child (w))));
+  else
+    g_print ("focus %s\n", G_OBJECT_TYPE_NAME (w));
+}
+
+static void
+quit (GSimpleAction *action, GVariant *param, gpointer app)
+{
+  g_application_quit (G_APPLICATION (app));
+}
+
+static void
+clear_console (GSimpleAction *action, GVariant *param, gpointer data)
+{
+  g_print ("clear-console\n");
+}
+
 static void
 activate (GtkApplication *app)
 {
-  GtkWidget *win = gtk_application_window_new (app);
-  GtkWidget *panes = mln_panes_new ();
-  GtkWidget *drawing = gtk_drawing_area_new ();
+  GtkWidget *win, *panes, *drawing;
   const char *start = g_getenv ("MLN_DEMO_LAYOUT");
+
+  /* After GTK has started, which sets the direction from the locale, and
+     before anything is made. */
+  if (g_getenv ("MLN_DEMO_RTL") != NULL)
+    gtk_widget_set_default_direction (GTK_TEXT_DIR_RTL);
+
+  win = gtk_application_window_new (app);
+  panes = mln_panes_new ();
+  drawing = gtk_drawing_area_new ();
 
   gtk_drawing_area_set_draw_func (GTK_DRAWING_AREA (drawing), draw, NULL, NULL);
 
@@ -137,11 +180,39 @@ activate (GtkApplication *app)
   g_signal_connect (panes, "layout-kept", G_CALLBACK (kept), NULL);
   gtk_widget_add_tick_callback (panes, geometry, NULL, NULL);
 
+  /* An item of the app's own on the console's tab menu, and a way for a
+     harness to ask for the attention mark. */
+  {
+    GMenu *items = g_menu_new ();
+    GSimpleAction *clear = g_simple_action_new ("clear-console", NULL);
+
+    g_signal_connect (clear, "activate", G_CALLBACK (clear_console), NULL);
+    g_action_map_add_action (G_ACTION_MAP (app), G_ACTION (clear));
+    g_menu_append (items, "Clear C_onsole", "app.clear-console");
+    mln_panes_set_pane_menu (MLN_PANES (panes), "console", G_MENU_MODEL (items));
+    g_object_unref (items);
+    g_object_unref (clear);
+  }
+
+  if (g_getenv ("MLN_DEMO_ATTENTION") != NULL)
+    mln_panes_set_attention (MLN_PANES (panes), g_getenv ("MLN_DEMO_ATTENTION"), TRUE);
+
   mln_panes_set_default (MLN_PANES (panes), "main", LAYOUT);
   mln_panes_set_mode (MLN_PANES (panes), "main");
   mln_panes_load (MLN_PANES (panes), start);
 
   gtk_window_set_title (GTK_WINDOW (win), "mullion-gtk");
+  g_signal_connect (win, "notify::focus-widget", G_CALLBACK (focus_moved), NULL);
+
+  {
+    GSimpleAction *q = g_simple_action_new ("quit", NULL);
+
+    g_signal_connect (q, "activate", G_CALLBACK (quit), app);
+    g_action_map_add_action (G_ACTION_MAP (app), G_ACTION (q));
+    gtk_application_set_accels_for_action (app, "app.quit",
+                                           (const char *[]) { "<Control>q", NULL });
+    g_object_unref (q);
+  }
   gtk_window_set_default_size (GTK_WINDOW (win), 1000, 640);
   gtk_window_set_child (GTK_WINDOW (win), panes);
   gtk_window_present (GTK_WINDOW (win));

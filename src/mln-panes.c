@@ -112,6 +112,53 @@ mln_host_new (GtkWidget *content)
   return GTK_WIDGET (self);
 }
 
+/* ---- a tab ---- */
+
+/*
+ * A tab is a widget that takes the focus itself, where a GtkBox only
+ * passes it on to what is in it: the tab is what the arrow keys, Home,
+ * End and the menu key are for. Its title and its cross are laid out as
+ * a row. Only the front tab of a strip, and its cross, are in the Tab
+ * chain (render says which), as a tablist's roving tab stop is.
+ */
+
+#define MLN_TYPE_TAB (mln_tab_get_type ())
+G_DECLARE_FINAL_TYPE (MlnTab, mln_tab, MLN, TAB, GtkWidget)
+
+struct _MlnTab
+{
+  GtkWidget parent;
+};
+
+G_DEFINE_FINAL_TYPE (MlnTab, mln_tab, GTK_TYPE_WIDGET)
+
+static void
+mln_tab_dispose (GObject *o)
+{
+  GtkWidget *child;
+
+  while ((child = gtk_widget_get_first_child (GTK_WIDGET (o))) != NULL)
+    gtk_widget_unparent (child);
+
+  G_OBJECT_CLASS (mln_tab_parent_class)->dispose (o);
+}
+
+static void
+mln_tab_class_init (MlnTabClass *klass)
+{
+  GtkWidgetClass *wc = GTK_WIDGET_CLASS (klass);
+
+  G_OBJECT_CLASS (klass)->dispose = mln_tab_dispose;
+  gtk_widget_class_set_layout_manager_type (wc, GTK_TYPE_BOX_LAYOUT);
+  gtk_widget_class_set_css_name (wc, "tab");
+  gtk_widget_class_set_accessible_role (wc, GTK_ACCESSIBLE_ROLE_TAB);
+}
+
+static void
+mln_tab_init (MlnTab *self)
+{
+}
+
 /* ---- the look ---- */
 
 /*
@@ -158,6 +205,10 @@ static const char *STYLE =
   "  border-bottom: 1px solid alpha(@borders, 0.8);"
   "}"
   "panes > .panedrawer > label { opacity: 0.7; }"
+  "panes > tabs > tab.attention > label { font-weight: bold; }"
+  "panes > tabs > tab.attention {"
+  "  box-shadow: inset 0 2px alpha(@theme_selected_bg_color, 0.9);"
+  "}"
   "panes > panedrop {"
   "  background-color: alpha(@theme_selected_bg_color, 0.18);"
   "  border: 2px solid alpha(@theme_selected_bg_color, 0.8);"
@@ -193,7 +244,11 @@ add_style (GdkDisplay *display)
 
   css = gtk_css_provider_new ();
   g_signal_connect (css, "parsing-error", G_CALLBACK (style_error), NULL);
+#if GDK_VERSION_MAX_ALLOWED >= GDK_VERSION_4_12
   gtk_css_provider_load_from_string (css, STYLE);
+#else
+  gtk_css_provider_load_from_data (css, STYLE, -1);
+#endif
   gtk_style_context_add_provider_for_display (display, GTK_STYLE_PROVIDER (css),
                                               STYLE_PRIORITY);
   g_object_set_data_full (G_OBJECT (display), "mln-panes-style", css, g_object_unref);
@@ -210,6 +265,7 @@ typedef struct
   GtkWidget *label;
   GtkWidget *shut;              /* the cross on the tab */
   gboolean shown;               /* what pane-shown last said */
+  GMenuModel *menu;             /* the app's items for its tab menu */
 } Pane;
 
 typedef struct { int x, y, w, h; } Box;
@@ -237,7 +293,7 @@ typedef enum
 typedef struct
 {
   DropKind kind;
-  MlnNode *leaf;                /* not a reference: good until the next render */
+  MlnNode *leaf;                /* a reference: a render mid-drag can free it */
   char *before;
   MlnDir dir;
   gboolean after;               /* the side in the tree */
@@ -286,6 +342,9 @@ struct _MlnPanes
   gboolean dragging;
   Drop drop;
   GtkWidget *hint;
+
+  GtkWidget *menu;              /* the tab menu that is open, if one is */
+  char *menu_id;                /* whose */
 };
 
 G_DEFINE_FINAL_TYPE (MlnPanes, mln_panes, GTK_TYPE_WIDGET)
@@ -319,6 +378,7 @@ static void on_tab_drag_update (GtkGestureDrag *g, double x, double y, gpointer 
 static void on_tab_drag_end (GtkGestureDrag *g, double x, double y, gpointer data);
 static gboolean on_tab_key (GtkEventControllerKey *keys, guint keyval, guint code,
                             GdkModifierType state, gpointer data);
+static void open_menu (MlnPanes *self, const char *id, double x, double y);
 
 static Pane *
 pane_of (MlnPanes *self, const char *id)
@@ -383,6 +443,9 @@ on_tab_pressed (GtkGestureClick *click, int n, double x, double y, gpointer data
   gtk_widget_grab_focus (p->tab);
 }
 
+static GtkWidget *reopen_button (MlnPanes *self, const char *id);
+static void focus_front (MlnPanes *self, MlnNode *leaf);
+
 static void
 on_tab_shut (GtkButton *button, gpointer data)
 {
@@ -390,30 +453,55 @@ on_tab_shut (GtkButton *button, gpointer data)
   Pane *p = data;
   MlnNode *leaf = mln_model_leaf_with (self->model, p->id);
 
-  if (!mln_model_close (self->model, p->id))
-    return;
+  char *id = g_strdup (p->id);
+
+  if (!mln_model_close (self->model, id))
+    {
+      g_free (id);
+      return;
+    }
 
   if (leaf != NULL && mln_model_holds (self->model, leaf))
     mln_model_set_focus (self->model, leaf);
 
   render (self);
+
+  /* Onto its button in the drawer, which is where it went; or, with no
+     drawer to reach, onto the front tab of what is left. */
+  {
+    GtkWidget *back = reopen_button (self, id);
+
+    if (back != NULL)
+      gtk_widget_grab_focus (back);
+    else
+      focus_front (self, leaf != NULL && mln_model_holds (self->model, leaf)
+                         ? leaf : mln_model_first_leaf (self->model));
+  }
+
+  g_free (id);
+}
+
+static void
+on_tab_menu_click (GtkGestureClick *click, int n, double x, double y, gpointer data)
+{
+  MlnPanes *self = g_object_get_data (G_OBJECT (click), "mln-panes");
+  Pane *p = data;
+  graphene_point_t at;
+
+  if (gtk_widget_compute_point (p->tab, GTK_WIDGET (self), &GRAPHENE_POINT_INIT (x, y), &at))
+    open_menu (self, p->id, at.x, at.y);
 }
 
 static GtkWidget *
 make_tab (MlnPanes *self, Pane *p)
 {
-  GtkWidget *tab = g_object_new (GTK_TYPE_BOX,
-                                 "orientation", GTK_ORIENTATION_HORIZONTAL,
-                                 "accessible-role", GTK_ACCESSIBLE_ROLE_TAB,
-                                 "focusable", TRUE,
-                                 "css-name", "tab",
-                                 NULL);
+  GtkWidget *tab = g_object_new (MLN_TYPE_TAB, NULL);
   GtkGesture *click = gtk_gesture_click_new ();
 
   p->label = gtk_label_new (p->title);
   gtk_label_set_ellipsize (GTK_LABEL (p->label), PANGO_ELLIPSIZE_END);
   gtk_label_set_width_chars (GTK_LABEL (p->label), 3);
-  gtk_box_append (GTK_BOX (tab), p->label);
+  gtk_widget_set_parent (p->label, tab);
 
   p->shut = gtk_button_new_from_icon_name ("window-close-symbolic");
   gtk_widget_add_css_class (p->shut, "flat");
@@ -421,7 +509,7 @@ make_tab (MlnPanes *self, Pane *p)
   gtk_widget_set_focus_on_click (p->shut, FALSE);
   g_object_set_data (G_OBJECT (p->shut), "mln-panes", self);
   g_signal_connect (p->shut, "clicked", G_CALLBACK (on_tab_shut), p);
-  gtk_box_append (GTK_BOX (tab), p->shut);
+  gtk_widget_set_parent (p->shut, tab);
 
   {
     char *name = g_strdup_printf ("Close %s", p->title);
@@ -442,6 +530,15 @@ make_tab (MlnPanes *self, Pane *p)
      tab that starts a drag has not been chosen. */
   g_signal_connect (click, "released", G_CALLBACK (on_tab_pressed), p);
   gtk_widget_add_controller (tab, GTK_EVENT_CONTROLLER (click));
+
+  {
+    GtkGesture *second = gtk_gesture_click_new ();
+
+    gtk_gesture_single_set_button (GTK_GESTURE_SINGLE (second), GDK_BUTTON_SECONDARY);
+    g_object_set_data (G_OBJECT (second), "mln-panes", self);
+    g_signal_connect (second, "pressed", G_CALLBACK (on_tab_menu_click), p);
+    gtk_widget_add_controller (tab, GTK_EVENT_CONTROLLER (second));
+  }
 
   {
     GtkGesture *drag = gtk_gesture_drag_new ();
@@ -603,12 +700,23 @@ on_divider_key (GtkEventControllerKey *keys, guint keyval, guint code,
   GArray *sides = g_object_get_data (G_OBJECT (d->bar), "mln-sides");
   int step = 0;
 
+  if (state & (GDK_ALT_MASK | GDK_CONTROL_MASK | GDK_SHIFT_MASK |
+               GDK_SUPER_MASK | GDK_META_MASK))
+    return FALSE;
+
+  /* Along the way it moves: left and right for a divider between
+     columns, up and down for one between rows. */
   switch (keyval)
     {
-    case GDK_KEY_Left: case GDK_KEY_Up: step = -1; break;
-    case GDK_KEY_Right: case GDK_KEY_Down: step = 1; break;
+    case GDK_KEY_Left:  step = row_of (d->split) ? -1 : 0; break;
+    case GDK_KEY_Right: step = row_of (d->split) ? 1 : 0; break;
+    case GDK_KEY_Up:    step = row_of (d->split) ? 0 : -1; break;
+    case GDK_KEY_Down:  step = row_of (d->split) ? 0 : 1; break;
     default: return FALSE;
     }
+
+  if (step == 0)
+    return FALSE;
 
   if ((keyval == GDK_KEY_Left || keyval == GDK_KEY_Right) && row_of (d->split) &&
       gtk_widget_get_direction (GTK_WIDGET (self)) == GTK_TEXT_DIR_RTL)
@@ -639,6 +747,7 @@ make_divider (MlnPanes *self, MlnNode *split, guint a, guint b)
   GtkGesture *click = gtk_gesture_click_new ();
   GtkEventController *keys = gtk_event_controller_key_new ();
   gboolean row = row_of (split);
+  GdkCursor *cursor = gdk_cursor_new_from_name (row ? "col-resize" : "row-resize", NULL);
 
   d->split = mln_node_ref (split);
   d->a = a;
@@ -648,12 +757,18 @@ make_divider (MlnPanes *self, MlnNode *split, guint a, guint b)
                                             : GTK_ORIENTATION_HORIZONTAL,
                          "accessible-role", GTK_ACCESSIBLE_ROLE_SEPARATOR,
                          "focusable", TRUE,
-                         "cursor", gdk_cursor_new_from_name (row ? "col-resize" : "row-resize", NULL),
+                         "cursor", cursor,
                          NULL);
+  g_clear_object (&cursor);
   gtk_widget_add_css_class (d->bar, "panesplit");
   gtk_accessible_update_property (GTK_ACCESSIBLE (d->bar),
                                   GTK_ACCESSIBLE_PROPERTY_LABEL,
-                                  row ? "Resize columns" : "Resize rows", -1);
+                                  row ? "Resize columns" : "Resize rows",
+                                  GTK_ACCESSIBLE_PROPERTY_ORIENTATION,
+                                  row ? GTK_ORIENTATION_VERTICAL : GTK_ORIENTATION_HORIZONTAL,
+                                  GTK_ACCESSIBLE_PROPERTY_VALUE_MIN, 0.0,
+                                  GTK_ACCESSIBLE_PROPERTY_VALUE_MAX, 100.0,
+                                  -1);
 
   g_object_set_data (G_OBJECT (d->bar), "mln-panes", self);
   g_object_set_data_full (G_OBJECT (d->bar), "mln-sides",
@@ -698,8 +813,19 @@ static void
 on_reopen (GtkButton *button, gpointer data)
 {
   MlnPanes *self = g_object_get_data (G_OBJECT (button), "mln-panes");
+  char *id = g_strdup (data);   /* the button goes with the render */
 
-  mln_panes_present (self, data, TRUE);
+  if (mln_model_reopen (self->model, id) != NULL)
+    {
+      Pane *p = pane_of (self, id);
+
+      render (self);
+
+      if (p != NULL)
+        gtk_widget_grab_focus (p->tab);
+    }
+
+  g_free (id);
 }
 
 static void
@@ -708,11 +834,30 @@ free_id (gpointer data, GClosure *closure)
   g_free (data);
 }
 
+static GtkWidget *
+reopen_button (MlnPanes *self, const char *id)
+{
+  for (GtkWidget *b = gtk_widget_get_first_child (self->drawer); b != NULL;
+       b = gtk_widget_get_next_sibling (b))
+    if (g_strcmp0 (g_object_get_data (G_OBJECT (b), "mln-id"), id) == 0 &&
+        gtk_widget_get_child_visible (self->drawer))
+      return b;
+
+  return NULL;
+}
+
 static void
 fill_drawer (MlnPanes *self)
 {
   GPtrArray *closed = mln_model_closed (self->model);
   GtkWidget *child;
+  char *had = NULL;
+
+  /* The buttons are made again; the one with the focus is given it back. */
+  for (child = gtk_widget_get_first_child (self->drawer); child != NULL;
+       child = gtk_widget_get_next_sibling (child))
+    if (gtk_widget_has_focus (child))
+      had = g_strdup (g_object_get_data (G_OBJECT (child), "mln-id"));
 
   while ((child = gtk_widget_get_first_child (self->drawer)) != NULL)
     gtk_box_remove (GTK_BOX (self->drawer), child);
@@ -731,6 +876,7 @@ fill_drawer (MlnPanes *self)
       gtk_widget_set_tooltip_text (b, tip);
       gtk_widget_add_css_class (b, "paneclosed");
       g_object_set_data (G_OBJECT (b), "mln-panes", self);
+      g_object_set_data_full (G_OBJECT (b), "mln-id", g_strdup (p->id), g_free);
       g_signal_connect_data (b, "clicked", G_CALLBACK (on_reopen), g_strdup (p->id),
                              free_id, 0);
       gtk_box_append (GTK_BOX (self->drawer), b);
@@ -742,6 +888,16 @@ fill_drawer (MlnPanes *self)
                                 (closed->len > 0 ||
                                  (self->dragging &&
                                   mln_model_closable (self->model, self->drag_id))));
+
+  if (had != NULL)
+    {
+      GtkWidget *again = reopen_button (self, had);
+
+      if (again != NULL)
+        gtk_widget_grab_focus (again);
+
+      g_free (had);
+    }
   g_ptr_array_unref (closed);
 }
 
@@ -796,6 +952,10 @@ sync_node (MlnPanes *self, MlnNode *node, GHashTable *drawn, GHashTable *front)
             gtk_widget_add_css_class (p->tab, "front");
           else
             gtk_widget_remove_css_class (p->tab, "front");
+
+          /* The front tab and its cross are the strip's Tab stops. */
+          gtk_widget_set_focusable (p->tab, on);
+          gtk_widget_set_focusable (p->shut, on);
 
           gtk_widget_set_visible (p->shut, mln_model_closable (self->model, p->id));
 
@@ -888,23 +1048,46 @@ sync_children (MlnPanes *self)
   gtk_widget_set_child_visible (self->blank, !some);
   fill_drawer (self);
 
-  /* Which panes are in front of somebody, told only where it changed. */
-  for (guint i = 0; i < self->order->len; i++)
-    {
-      Pane *p = self->order->pdata[i];
-      gboolean now = g_hash_table_contains (front, p) &&
-                     gtk_widget_get_mapped (GTK_WIDGET (self));
+  /* Which panes are in front of somebody, told only where it changed --
+     and told once everything here is settled, from a list of its own:
+     what the app does about it may remove a pane or render again. */
+  {
+    GPtrArray *on = g_ptr_array_new_with_free_func (g_free);
+    GPtrArray *off = g_ptr_array_new_with_free_func (g_free);
 
-      if (now != p->shown)
-        {
-          p->shown = now;
-          g_signal_emit (self, signals[PANE_SHOWN], 0, p->id, now);
-        }
-    }
+    for (guint i = 0; i < self->order->len; i++)
+      {
+        Pane *p = self->order->pdata[i];
+        gboolean now = g_hash_table_contains (front, p) &&
+                       gtk_widget_get_mapped (GTK_WIDGET (self));
 
-  g_hash_table_unref (drawn);
-  g_hash_table_unref (front);
-  gtk_widget_queue_resize (GTK_WIDGET (self));
+        if (now != p->shown)
+          {
+            p->shown = now;
+            g_ptr_array_add (now ? on : off, g_strdup (p->id));
+          }
+
+        /* Looked at, which is what the mark asked for. */
+        if (now)
+          gtk_widget_remove_css_class (p->tab, "attention");
+      }
+
+    g_hash_table_unref (drawn);
+    g_hash_table_unref (front);
+    gtk_widget_queue_resize (GTK_WIDGET (self));
+
+    g_object_ref (self);
+
+    for (guint i = 0; i < off->len; i++)
+      g_signal_emit (self, signals[PANE_SHOWN], 0, off->pdata[i], FALSE);
+
+    for (guint i = 0; i < on->len; i++)
+      g_signal_emit (self, signals[PANE_SHOWN], 0, on->pdata[i], TRUE);
+
+    g_object_unref (self);
+    g_ptr_array_unref (on);
+    g_ptr_array_unref (off);
+  }
 }
 
 static void
@@ -959,8 +1142,8 @@ static void
 drop_clear (Drop *d)
 {
   g_clear_pointer (&d->before, g_free);
+  g_clear_pointer (&d->leaf, mln_node_unref);
   d->kind = DROP_NONE;
-  d->leaf = NULL;
 }
 
 /* Where a tab let go at (x, y) lands: the drawer, a place in a strip, a
@@ -991,7 +1174,7 @@ under (MlnPanes *self, double x, double y, Drop *d)
   if ((s = strip_at (self, x, y)) == NULL)
     return;
 
-  d->leaf = s->leaf;
+  d->leaf = mln_node_ref (s->leaf);
   box = s->box;
 
   /* Over the strip, which is a row of places: before the first tab whose
@@ -1208,7 +1391,6 @@ land (gpointer data)
         gtk_widget_grab_focus (pane_of (self, l->id)->tab);
     }
 
-  mln_node_unref (l->drop.leaf);
   drop_clear (&l->drop);
   g_free (l->id);
   g_object_unref (self);
@@ -1236,6 +1418,9 @@ on_tab_drag_end (GtkGestureDrag *g, double ox, double oy, gpointer data)
   l->drop.before = g_strdup (self->drop.before);
   mln_node_ref (l->drop.leaf);
   end_drag (self);
+
+  /* A leaf that has left the tree since the pointer last moved is a drop
+     on nothing (land asks the model). */
   g_idle_add (land, l);
 }
 
@@ -1271,6 +1456,18 @@ on_tab_key (GtkEventControllerKey *keys, guint keyval, guint code,
   GPtrArray *live;
   int at = -1, to, n;
 
+  if (leaf != NULL &&
+      (keyval == GDK_KEY_Menu || (keyval == GDK_KEY_F10 && (state & GDK_SHIFT_MASK))))
+    {
+      graphene_rect_t r;
+
+      if (gtk_widget_compute_bounds (p->tab, GTK_WIDGET (self), &r))
+        open_menu (self, p->id, r.origin.x + r.size.width / 2,
+                   r.origin.y + r.size.height);
+
+      return TRUE;
+    }
+
   if (leaf == NULL || (state & (GDK_ALT_MASK | GDK_CONTROL_MASK | GDK_SHIFT_MASK |
                                 GDK_SUPER_MASK | GDK_META_MASK)))
     return FALSE;
@@ -1304,14 +1501,12 @@ on_tab_key (GtkEventControllerKey *keys, guint keyval, guint code,
   return TRUE;
 }
 
-/* The leaf a command is about: the one the focus is in, or the one last
-   pressed in, or the first there is. */
+/* The leaf the keyboard focus is in, or NULL when it is not in one. */
 static MlnNode *
-current (MlnPanes *self)
+focused_leaf (MlnPanes *self)
 {
   GtkRoot *root = gtk_widget_get_root (GTK_WIDGET (self));
   GtkWidget *at = root != NULL ? gtk_root_get_focus (root) : NULL;
-  MlnNode *focus = mln_model_get_focus (self->model);
 
   for (; at != NULL && at != GTK_WIDGET (self); at = gtk_widget_get_parent (at))
     {
@@ -1324,6 +1519,20 @@ current (MlnPanes *self)
         if (((Strip *) self->strips->pdata[i])->strip == at)
           return ((Strip *) self->strips->pdata[i])->leaf;
     }
+
+  return NULL;
+}
+
+/* The leaf a command is about: the one the focus is in, or the one last
+   pressed in, or the first there is. */
+static MlnNode *
+current (MlnPanes *self)
+{
+  MlnNode *focus = mln_model_get_focus (self->model);
+  MlnNode *at = focused_leaf (self);
+
+  if (at != NULL)
+    return at;
 
   if (focus != NULL && strip_for (self, focus) != NULL)
     return focus;
@@ -1379,6 +1588,41 @@ editing (GtkWidget *w)
       return TRUE;
 
   return FALSE;
+}
+
+/*
+ * Whether the key pressed is `want', by where it is and not by what it
+ * types, as mullion matches KeyboardEvent.code: Alt over a letter is a
+ * different letter on half the layouts there are. The key's own keyval
+ * first, then what the same key types in each group (layout) at its
+ * first level -- so Alt W is found on a Cyrillic layout that has a Latin
+ * group beside it.
+ */
+static gboolean
+chord_is (GtkEventControllerKey *keys, guint keyval, guint code, guint want)
+{
+  GdkDisplay *display;
+  GdkKeymapKey *mapped = NULL;
+  guint *keyvals = NULL;
+  int n = 0;
+  gboolean found = FALSE;
+
+  if (gdk_keyval_to_lower (keyval) == want)
+    return TRUE;
+
+  display = gtk_widget_get_display (gtk_event_controller_get_widget (GTK_EVENT_CONTROLLER (keys)));
+
+  if (!gdk_display_map_keycode (display, code, &mapped, &keyvals, &n))
+    return FALSE;
+
+  for (int i = 0; i < n && !found; i++)
+    if (mapped[i].level == 0 && gdk_keyval_to_lower (keyvals[i]) == want)
+      found = TRUE;
+
+  g_free (mapped);
+  g_free (keyvals);
+
+  return found;
 }
 
 static void
@@ -1477,11 +1721,12 @@ on_key (GtkEventControllerKey *keys, guint keyval, guint code,
           g_free (mine);
         }
     }
-  else if (keyval == GDK_KEY_backslash || keyval == GDK_KEY_minus)
+  else if (chord_is (keys, keyval, code, GDK_KEY_backslash) ||
+           chord_is (keys, keyval, code, GDK_KEY_minus))
     {
       /* The pane in front, off into a half of its own; in a leaf with
          nothing else in it, the first pane in the drawer there instead. */
-      MlnDir dir = keyval == GDK_KEY_backslash ? MLN_ROW : MLN_COL;
+      MlnDir dir = chord_is (keys, keyval, code, GDK_KEY_backslash) ? MLN_ROW : MLN_COL;
       GPtrArray *closed = mln_model_closed (self->model);
       char *moving = g_strdup (live->len > 1 ? id
                                : closed->len > 0 ? closed->pdata[0] : NULL);
@@ -1506,14 +1751,14 @@ on_key (GtkEventControllerKey *keys, guint keyval, guint code,
       render (self);
       focus_front (self, leaf);
     }
-  else if ((keyval == GDK_KEY_w || keyval == GDK_KEY_W) && id != NULL)
+  else if (chord_is (keys, keyval, code, GDK_KEY_w) && id != NULL)
     {
       /* Onto a leaf still in the tree: this one if it kept anything. */
       if (mln_model_close (self->model, id))
         done (self, mln_model_holds (self->model, leaf) ? leaf
                                                        : mln_model_first_leaf (self->model));
     }
-  else if (keyval == GDK_KEY_0)
+  else if (chord_is (keys, keyval, code, GDK_KEY_0))
     {
       mln_model_reset (self->model);
       render (self);
@@ -1525,6 +1770,141 @@ on_key (GtkEventControllerKey *keys, guint keyval, guint code,
   g_ptr_array_unref (live);
 
   return used;
+}
+
+
+/* ---- a tab's menu ---- */
+
+/*
+ * What a tab's menu offers: what the chords do, for the pane it is on,
+ * and only what applies to it -- no Split in a leaf with nothing to split
+ * off, no Close for a pane that cannot be -- then the app's items for the
+ * pane, then Reset Layout. Built each time it opens, since what applies
+ * changes with every move.
+ */
+
+static void
+act_on_pane (GtkWidget *w, const char *name, GVariant *param)
+{
+  MlnPanes *self = MLN_PANES (w);
+  const char *id = g_variant_get_string (param, NULL);
+  char *mine = g_strdup (id);
+  MlnNode *leaf = mln_model_leaf_with (self->model, mine);
+
+  if (strcmp (name, "panes.close") == 0)
+    {
+      if (mln_model_close (self->model, mine))
+        done (self, leaf != NULL && mln_model_holds (self->model, leaf)
+                    ? leaf : mln_model_first_leaf (self->model));
+    }
+  else if (leaf != NULL && (strcmp (name, "panes.split-right") == 0 ||
+                            strcmp (name, "panes.split-down") == 0))
+    {
+      mln_model_drop_beside (self->model, mine, leaf,
+                             strcmp (name, "panes.split-right") == 0 ? MLN_ROW : MLN_COL,
+                             TRUE);
+      done (self, mln_model_leaf_with (self->model, mine));
+    }
+  else if (leaf != NULL && strcmp (name, "panes.zoom") == 0)
+    {
+      mln_model_set_zoom (self->model, mln_model_get_zoom (self->model) == leaf ? NULL : leaf);
+      render (self);
+      focus_front (self, leaf);
+    }
+
+  g_free (mine);
+}
+
+static void
+act_reset (GtkWidget *w, const char *name, GVariant *param)
+{
+  MlnPanes *self = MLN_PANES (w);
+
+  mln_model_reset (self->model);
+  render (self);
+}
+
+static void
+menu_closed (GtkPopover *popover, gpointer data)
+{
+  MlnPanes *self = data;
+
+  g_clear_pointer (&self->menu_id, g_free);
+}
+
+static void
+open_menu (MlnPanes *self, const char *id, double x, double y)
+{
+  Pane *p = pane_of (self, id);
+  MlnNode *leaf = mln_model_leaf_with (self->model, id);
+  GMenu *menu = g_menu_new (), *layout = g_menu_new (), *end = g_menu_new ();
+  GPtrArray *live;
+  Strip *s;
+  char *target;
+
+  if (p == NULL || leaf == NULL)
+    return;
+
+  live = mln_model_live_tabs (self->model, leaf);
+  s = strip_for (self, leaf);
+  target = g_strdup_printf ("::%s", id);
+
+#define ITEM(label, action)                                             \
+  G_STMT_START {                                                        \
+    char *detailed = g_strconcat (action, target, NULL);                \
+    g_menu_append (layout, label, detailed);                            \
+    g_free (detailed);                                                  \
+  } G_STMT_END
+
+  /* A pane alone in its leaf has nothing to split off, and a split that
+     would leave either half under its minimum is refused. */
+  if (live->len > 1 && s != NULL)
+    {
+      if (mln_model_splittable (self->model, leaf, id, MLN_ROW, s->box.w))
+        ITEM ("Split _Right", "panes.split-right");
+
+      if (mln_model_splittable (self->model, leaf, id, MLN_COL, s->box.h))
+        ITEM ("Split _Down", "panes.split-down");
+    }
+
+  ITEM (mln_model_get_zoom (self->model) == leaf ? "_Unzoom" : "_Zoom", "panes.zoom");
+
+  if (mln_model_closable (self->model, id))
+    ITEM ("_Close", "panes.close");
+
+#undef ITEM
+
+  g_menu_append_section (menu, NULL, G_MENU_MODEL (layout));
+
+  if (p->menu != NULL)
+    g_menu_append_section (menu, NULL, p->menu);
+
+  g_menu_append (end, "Reset _Layout", "panes.reset");
+  g_menu_append_section (menu, NULL, G_MENU_MODEL (end));
+
+  /* One open at a time, parented to MlnPanes, which presents it again
+     when it is allocated; the app's items find the app's actions from
+     here as from the tab. */
+  if (self->menu != NULL)
+    gtk_popover_popdown (GTK_POPOVER (self->menu));
+
+  g_clear_pointer (&self->menu, gtk_widget_unparent);
+  self->menu = gtk_popover_menu_new_from_model (G_MENU_MODEL (menu));
+  gtk_widget_set_parent (self->menu, GTK_WIDGET (self));
+  gtk_popover_set_has_arrow (GTK_POPOVER (self->menu), FALSE);
+  gtk_popover_set_pointing_to (GTK_POPOVER (self->menu),
+                               &(GdkRectangle) { (int) x, (int) y, 1, 1 });
+
+  g_free (self->menu_id);
+  self->menu_id = g_strdup (id);
+  g_signal_connect (self->menu, "closed", G_CALLBACK (menu_closed), self);
+  gtk_popover_popup (GTK_POPOVER (self->menu));
+
+  g_ptr_array_unref (live);
+  g_free (target);
+  g_object_unref (menu);
+  g_object_unref (layout);
+  g_object_unref (end);
 }
 
 /* ---- laying out ---- */
@@ -1637,7 +2017,16 @@ allocate_split (MlnPanes *self, MlnNode *split, Box box)
           want[i] -= (want[i] - floor_[i]) / over * MIN (short_, over);
       }
 
-  at = row ? box.x : box.y;
+  /* In a row that reads right to left the first child is on the right,
+     as mullion's flex row puts it, and as the drops, the dividers and the
+     chords all take it to be. */
+  {
+    gboolean mirrored = row && gtk_widget_get_direction (GTK_WIDGET (self)) == GTK_TEXT_DIR_RTL;
+
+    at = row ? box.x : box.y;
+
+    if (mirrored)
+      at = box.x + box.w;
 
   {
     double carry = 0;
@@ -1655,13 +2044,17 @@ allocate_split (MlnPanes *self, MlnNode *split, Box box)
           {
             Divider *d = divider_at (self, split, (guint) prev);
 
+            if (mirrored)
+              at -= self->split;
+
             if (d != NULL)
               {
                 place (d->bar, row ? (Box) { at, box.y, self->split, box.h }
                                    : (Box) { box.x, at, box.w, self->split });
               }
 
-            at += self->split;
+            if (!mirrored)
+              at += self->split;
           }
 
         /* Whole pixels, the remainder carried so the children fill the
@@ -1669,6 +2062,9 @@ allocate_split (MlnPanes *self, MlnNode *split, Box box)
         carry += want[i];
         size = (int) (carry + 0.5);
         carry -= size;
+
+        if (mirrored)
+          at -= size;
 
         kid = row ? (Box) { at, box.y, size, box.h } : (Box) { box.x, at, box.w, size };
         allocate_node (self, mln_node_kid (split, i), kid);
@@ -1685,6 +2081,13 @@ allocate_split (MlnPanes *self, MlnNode *split, Box box)
                 double before = g_array_index (sides, double, 0);
 
                 g_array_index (sides, double, 1) = before + size;
+
+                /* Where it is, as mullion's separator says: the first
+                   side's share of the two, in percent. */
+                if (before + size > 0)
+                  gtk_accessible_update_property (GTK_ACCESSIBLE (d->bar),
+                                                  GTK_ACCESSIBLE_PROPERTY_VALUE_NOW,
+                                                  100.0 * before / (before + size), -1);
               }
           }
 
@@ -1699,9 +2102,12 @@ allocate_split (MlnPanes *self, MlnNode *split, Box box)
             }
         }
 
-        at += size;
+        if (!mirrored)
+          at += size;
+
         prev = (int) i;
       }
+  }
   }
 }
 
@@ -1777,6 +2183,9 @@ mln_panes_size_allocate (GtkWidget *w, int width, int height, int baseline)
   if (gtk_widget_get_child_visible (self->hint))
     place (self->hint, self->drop.hint);
 
+  if (self->menu != NULL && gtk_widget_get_visible (self->menu))
+    gtk_popover_present (GTK_POPOVER (self->menu));
+
   if (tree == NULL || !mln_model_alive (self->model, tree))
     {
       place (self->blank, box);
@@ -1791,6 +2200,7 @@ mln_panes_size_allocate (GtkWidget *w, int width, int height, int baseline)
 static void
 pane_free (Pane *p)
 {
+  g_clear_object (&p->menu);
   g_free (p->id);
   g_free (p->title);
   g_free (p);
@@ -1802,6 +2212,9 @@ mln_panes_dispose (GObject *o)
   MlnPanes *self = MLN_PANES (o);
 
   g_clear_handle_id (&self->render_idle, g_source_remove);
+
+  /* The menu first: it is a child of this widget and can name a pane. */
+  g_clear_pointer (&self->menu, gtk_widget_unparent);
 
   if (self->strips != NULL)
     {
@@ -1829,6 +2242,8 @@ mln_panes_dispose (GObject *o)
   g_clear_pointer (&self->drawer, gtk_widget_unparent);
   g_clear_pointer (&self->blank, gtk_widget_unparent);
   g_clear_pointer (&self->hint, gtk_widget_unparent);
+  g_clear_pointer (&self->menu, gtk_widget_unparent);
+  g_clear_pointer (&self->menu_id, g_free);
   g_clear_pointer (&self->drag_id, g_free);
   drop_clear (&self->drop);
 
@@ -1895,6 +2310,7 @@ mln_panes_set_property (GObject *o, guint id, const GValue *v, GParamSpec *spec)
       return;
     }
 
+  g_object_notify_by_pspec (o, spec);
   gtk_widget_queue_resize (GTK_WIDGET (self));
 }
 
@@ -1980,6 +2396,14 @@ mln_panes_class_init (MlnPanesClass *klass)
                   0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
 
   gtk_widget_class_set_css_name (wc, "panes");
+
+  /* What a tab's menu does, and what an app can do too, by name:
+     gtk_widget_activate_action (panes, "panes.close", "s", id). */
+  gtk_widget_class_install_action (wc, "panes.close", "s", act_on_pane);
+  gtk_widget_class_install_action (wc, "panes.split-right", "s", act_on_pane);
+  gtk_widget_class_install_action (wc, "panes.split-down", "s", act_on_pane);
+  gtk_widget_class_install_action (wc, "panes.zoom", "s", act_on_pane);
+  gtk_widget_class_install_action (wc, "panes.reset", NULL, act_reset);
 }
 
 static void
@@ -2015,7 +2439,9 @@ mln_panes_init (MlnPanes *self)
   {
     GtkEventController *keys = gtk_event_controller_key_new ();
 
-    gtk_event_controller_set_propagation_phase (keys, GTK_PHASE_CAPTURE);
+    /* After the content, as mullion listens on the window after the
+       page: a terminal that uses Alt with an arrow keeps it. */
+    gtk_event_controller_set_propagation_phase (keys, GTK_PHASE_BUBBLE);
     g_signal_connect (keys, "key-pressed", G_CALLBACK (on_key), self);
     gtk_widget_add_controller (GTK_WIDGET (self), keys);
   }
@@ -2107,13 +2533,25 @@ mln_panes_remove (MlnPanes *self, const char *id)
   if (p == NULL)
     return NULL;
 
-  mln_model_remove (self->model, id);
+  /* Out of the tables first, so that nothing the app does when it is told
+     below can find it again. */
+  g_hash_table_steal (self->panes, p->id);
 
-  if (p->shown)
-    g_signal_emit (self, signals[PANE_SHOWN], 0, p->id, FALSE);
+  {
+    guint at;
+
+    if (g_ptr_array_find (self->order, p, &at))
+      g_ptr_array_steal_index (self->order, at);
+  }
+
+  mln_model_remove (self->model, p->id);
 
   if (gtk_widget_get_parent (p->tab) != NULL)
     gtk_box_remove (GTK_BOX (gtk_widget_get_parent (p->tab)), p->tab);
+
+  /* Its menu, if it is open, is about a pane there no longer is. */
+  if (self->menu != NULL && g_strcmp0 (self->menu_id, id) == 0)
+    gtk_popover_popdown (GTK_POPOVER (self->menu));
 
   host = MLN_HOST (p->host);
   content = g_object_ref (host->content);
@@ -2121,10 +2559,12 @@ mln_panes_remove (MlnPanes *self, const char *id)
   host->content = NULL;
   gtk_widget_unparent (p->host);
   g_clear_object (&p->tab);
-
-  g_hash_table_remove (self->panes, id);
-  g_ptr_array_remove (self->order, p);
   render (self);
+
+  if (p->shown)
+    g_signal_emit (self, signals[PANE_SHOWN], 0, p->id, FALSE);
+
+  pane_free (p);
 
   return content;
 }
@@ -2148,6 +2588,15 @@ mln_panes_set_title (MlnPanes *self, const char *id, const char *title)
   g_free (p->title);
   p->title = g_strdup (title);
   gtk_label_set_text (GTK_LABEL (p->label), title);
+
+  {
+    char *name = g_strdup_printf ("Close %s", title);
+
+    gtk_accessible_update_property (GTK_ACCESSIBLE (p->shut),
+                                    GTK_ACCESSIBLE_PROPERTY_LABEL, name, -1);
+    g_free (name);
+  }
+
   render (self);
 }
 
@@ -2156,6 +2605,32 @@ mln_panes_set_available (MlnPanes *self, const char *id, gboolean available)
 {
   mln_model_set_available (self->model, id, available);
   render (self);
+}
+
+void
+mln_panes_set_attention (MlnPanes *self, const char *id, gboolean attention)
+{
+  Pane *p = pane_of (self, id);
+
+  if (p == NULL)
+    return;
+
+  /* A pane in view is being looked at already. */
+  if (attention && !p->shown)
+    gtk_widget_add_css_class (p->tab, "attention");
+  else
+    gtk_widget_remove_css_class (p->tab, "attention");
+}
+
+void
+mln_panes_set_pane_menu (MlnPanes *self, const char *id, GMenuModel *menu)
+{
+  Pane *p = pane_of (self, id);
+
+  if (p == NULL)
+    return;
+
+  g_set_object (&p->menu, menu);
 }
 
 void
@@ -2174,8 +2649,28 @@ void
 mln_panes_present (MlnPanes *self, const char *id, gboolean focus)
 {
   Pane *p = pane_of (self, id);
+  MlnNode *busy = NULL, *away = NULL;
 
-  if (p == NULL || mln_model_present (self->model, id, NULL, NULL) == NULL)
+  /* Raised at somebody rather than asked for (no focus): anywhere but the
+     leaf they are working in, as mullion does -- a box put in front of the
+     file somebody is editing answers one question by hiding another. */
+  if (!focus && mln_model_loaded (self->model))
+    {
+      busy = focused_leaf (self);
+
+      for (guint i = 0; i < self->strips->len && busy != NULL; i++)
+        {
+          Strip *s = self->strips->pdata[i];
+
+          if (s->leaf != busy && gtk_widget_get_child_visible (s->strip))
+            {
+              away = s->leaf;
+              break;
+            }
+        }
+    }
+
+  if (p == NULL || mln_model_present (self->model, id, away, busy) == NULL)
     return;
 
   render (self);
@@ -2221,6 +2716,14 @@ mln_panes_get_leaf_bounds (MlnPanes *self, const char *id, graphene_rect_t *boun
   graphene_rect_init (bounds, s->box.x, s->box.y, s->box.w, s->box.h);
 
   return TRUE;
+}
+
+gboolean
+mln_panes_get_closed_bounds (MlnPanes *self, const char *id, graphene_rect_t *bounds)
+{
+  GtkWidget *b = reopen_button (self, id);
+
+  return b != NULL && gtk_widget_compute_bounds (b, GTK_WIDGET (self), bounds);
 }
 
 char **
