@@ -444,6 +444,9 @@ def drags_out_and_in(d):
     k = d.kept()
     check("floating" not in k and tabs(k)[-1] == (["inspector", "console"], 1),
           f"and dragged into another window's leaf, it lands there: {k}")
+    # With no window manager, X11 leaves the input focus nowhere once the
+    # window that had it is gone; a click gives it back for Ctrl Q.
+    d.click(*d.centre("editor"))
 
 
 def floats_kept(d):
