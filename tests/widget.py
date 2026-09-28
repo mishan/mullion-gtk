@@ -519,6 +519,39 @@ def corner(d):
     check(d.lines("corner editor ")[-1] == "0", "with no corner to leave room for")
 
 
+def corners_over(d, id):
+    """Whether a corner in sight lies over pane `id`'s leaf."""
+    x, y, w, h = d.geometry()[id]["leaf"]
+    got = json.loads(d.lines("corners ")[-1])
+    return any(x <= cx and cx + cw <= x + w and y <= cy and cy < y + h
+               for cx, cy, cw, ch in got)
+
+
+def corner_pinned(d):
+    def to_console():
+        # The pointer and the focus in the console, away from the others.
+        d.click(*d.centre("console", "leaf"))
+
+    to_console()
+    check(not corners_over(d, "inspector") and not corners_over(d, "editor"),
+          "a corner is out of sight with the pointer and the focus elsewhere")
+    d.key("ctrl+p")                     # the demo pins the inspector's
+    check(corners_over(d, "inspector"), "and in sight, pinned")
+    d.key("ctrl+p")
+    check(not corners_over(d, "inspector"), "and out of sight again, let go")
+
+    # The drawing pinned, behind the editor: the pin is the front pane's.
+    d.key("ctrl+shift+p")
+    check(not corners_over(d, "editor"),
+          "a pinned pane behind a tab keeps no corner in sight")
+    d.click(*d.centre("drawing"))
+    to_console()
+    check(corners_over(d, "drawing"), "and in front, it does")
+    d.click(*d.centre("editor"))
+    to_console()
+    check(not corners_over(d, "editor"), "and behind again, it does not")
+
+
 def corner_after_a_window(d):
     # Out into a window by the tab menu, and back by its window's: its host
     # comes back into the main one, and must not come back over the corner.
@@ -591,6 +624,9 @@ scenario(floats_kept, env={"MLN_DEMO_LAYOUT": json.dumps({
 
 print("# corner")
 scenario(corner, env={"MLN_DEMO_CORNER": "1"})
+
+print("# corner_pinned")
+scenario(corner_pinned, env={"MLN_DEMO_CORNER": "1"})
 
 print("# corner_after_a_window")
 scenario(corner_after_a_window, env={"MLN_DEMO_CORNER": "1"})

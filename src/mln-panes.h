@@ -106,6 +106,14 @@ MLN_EXPORT void        mln_panes_set_available (MlnPanes *self, const char *id,
 MLN_EXPORT void        mln_panes_set_icon      (MlnPanes *self, const char *id,
                                      GIcon *icon);
 
+/* Whether a pane's corner stays in sight while the pane is in front of
+   its leaf, rather than only while the pointer or the focus is there: for
+   a pane whose first row makes room for it (mln_panes_get_corner_width),
+   where it covers nothing. Off for a pane when it is registered or added,
+   again too. */
+MLN_EXPORT void        mln_panes_set_corner_pinned (MlnPanes *self, const char *id,
+                                         gboolean pinned);
+
 /* The "header" property (see MlnHeader). */
 MLN_EXPORT void        mln_panes_set_header    (MlnPanes *self, MlnHeader header);
 MLN_EXPORT MlnHeader   mln_panes_get_header    (MlnPanes *self);
