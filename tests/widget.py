@@ -43,7 +43,7 @@ class Demo:
         self.log = os.path.join(OUT, name + ".log")
         if os.path.exists(self.log):
             os.remove(self.log)
-        s.spawn([DEMO], log=self.log)
+        self.proc = s.spawn([DEMO], log=self.log)
         s.wait_window(W)
         self.settle()
 
@@ -68,6 +68,19 @@ class Demo:
     def settle(self):
         self.s.wait_stable(window=W)
         time.sleep(0.2)
+
+    def focus(self):
+        f = self.lines("focus ")
+        return f[-1] if f else None
+
+    def quit(self):
+        """Ctrl Q, and wait for it to go: dispose runs, under ASan."""
+        self.s.key("ctrl+q")
+        for _ in range(100):
+            if self.proc.poll() is not None:
+                return self.proc.returncode
+            time.sleep(0.1)
+        return None
 
     def centre(self, id, part="tab"):
         x, y, w, h = self.geometry()[id][part]
@@ -97,7 +110,8 @@ class Demo:
             xt.move(x1 + 3 * i, y1 + 3 * i)
             time.sleep(0.03)
         time.sleep(0.4)
-        x2, y2 = to(self.geometry()) if callable(to) else to
+        self.during = self.geometry()
+        x2, y2 = to(self.during) if callable(to) else to
         x2, y2 = int(x2 + ox), int(y2 + oy)
         x0, y0 = x1 + 15, y1 + 15
         for i in range(1, 21):
@@ -137,10 +151,13 @@ def check(ok, what):
         failures += 1
 
 
-def scenario(fn):
+def scenario(fn, env=None):
     name = fn.__name__
     with shotbox.Session(size=(1100, 720), wayland=WAYLAND,
-                         env={"GDK_BACKEND": "wayland" if WAYLAND else "x11"},
+                         env={"GDK_BACKEND": "wayland" if WAYLAND else "x11",
+                              # The leaks GTK leaves at exit are GTK's.
+                              "ASAN_OPTIONS": "detect_leaks=0",
+                              **(env or {})},
                          failed=os.path.join(OUT, name + "-failed.png")) as s:
         d = Demo(s, name)
         try:
@@ -148,12 +165,18 @@ def scenario(fn):
         except Exception as e:
             check(False, f"{name}: {e!r}")
         s.capture(os.path.join(OUT, name + ".png"), window=W, park=True)
+        code = d.quit()
+        check(code == 0, f"{name}: the window closes cleanly ({code})")
         # Any popover on Xvfb (no compositor) gets this one from GDK; a
         # plain GtkPopoverMenu in a window of its own does too.
         log = "\n".join(l for l in open(d.log).read().splitlines()
                         if "gdk_frame_timings_submitted() called on submitted frame" not in l)
         check("CRITICAL" not in log and "WARNING" not in log,
               f"{name}: nothing warned")
+        # And a sanitizer's report, which a demo stopped by the session
+        # would otherwise take with it unread.
+        check("AddressSanitizer" not in log and "runtime error:" not in log,
+              f"{name}: no sanitizer report")
 
 
 # ---- scenarios ----
@@ -181,7 +204,7 @@ def closes_and_reopens(d):
     check(all("console" not in t for t, _ in tabs(d.kept())),
           f"its cross closes a pane: {tabs(d.kept())}")
     check("console" not in d.shown(), "and it is out of view")
-    d.click(95, 14)                     # its button in the drawer
+    d.click(*d.centre("console", "closed"))     # its button in the drawer
     check(tabs(d.kept()) == [(["editor", "drawing"], 0), (["console"], 0),
                              (["inspector"], 0)],
           f"and its button in the drawer puts it back where it was: {tabs(d.kept())}")
@@ -227,6 +250,8 @@ def escape_cancels(d):
     before = d.kept()
     tx, ty = d.centre("console")
     d.drag(tx, ty, leaf_at("inspector", 0.5, 0.5), escape=True)
+    check(d.during["inspector"]["leaf"][1] > d.geometry()["inspector"]["leaf"][1],
+          "(the drag was on: the drawer's row came up over the layout)")
     check(d.kept() == before, "Escape during a drag leaves the layout as it was")
 
 
@@ -287,12 +312,72 @@ def tab_menu(d):
     check(d.lines("clear-console") != [], "an item of the app's own on a tab's menu runs")
 
 
+def drops_on_the_drawer(d):
+    tx, ty = d.centre("console")
+
+    def drawer(g):
+        x, y, w, h = g["editor"]["leaf"]
+        return x + 60, y - 10                     # the row over the layout
+
+    d.drag(tx, ty, drawer)
+    check(all("console" not in t for t, _ in tabs(d.kept())),
+          f"a tab dropped on the drawer closes its pane: {tabs(d.kept())}")
+    check("closed" in d.geometry()["console"], "and it is in the drawer")
+
+
+def split_chords(d):
+    d.click(*d.centre("drawing"))
+    d.key("alt+\\")
+    check(tabs(d.kept())[:2] == [(["editor"], 0), (["drawing"], 0)],
+          f"Alt \\ splits the pane in front off to the right: {tabs(d.kept())}")
+    d.click(*d.centre("inspector"))
+    d.key("alt+minus")
+    check(tabs(d.kept())[-1] == (["inspector"], 0),
+          f"Alt - in a leaf of one pane does nothing when the drawer is empty: {tabs(d.kept())}")
+
+
+def tab_order(d):
+    d.click(*d.centre("inspector", "leaf"))      # into the inspector's text
+    seen = []
+    for _ in range(12):
+        d.key("ctrl+Tab")               # Tab alone is a tab in a text view
+        seen.append(d.focus())
+    tabs_seen = [f for f in seen if f.startswith("tab ")]
+    check(tabs_seen != [], f"the Tab key reaches the tabs: {seen}")
+    check("tab Drawing" not in seen, "but not a tab behind another")
+    closes = [f for f in seen if f == "GtkButton"]
+    check(len(set(i for i, f in enumerate(seen) if f == "GtkButton")) <= 3 * 2,
+          f"and only the front tabs' crosses: {seen}")
+
+
+def right_to_left(d):
+    ex, ey, ew, eh = d.geometry()["editor"]["leaf"]
+    ix = d.geometry()["inspector"]["leaf"][0]
+    check(ix < ex, f"a row reads right to left: the first child is on the right ({ix} < {ex})")
+    tx, ty = d.centre("inspector")
+    d.drag(tx, ty, leaf_at("editor", 0.95, 0.5))       # its right edge, on the screen
+    k = d.kept()
+    row = k["kids"][0]
+    check(row.get("dir") == "row" and tabs(row)[0] == (["inspector"], 0),
+          f"a tab dropped on a leaf's right edge goes before it, which is right: {tabs(k)}")
+
+
 os.makedirs(OUT, exist_ok=True)
 
 for fn in (starts, raises, closes_and_reopens, drags_beside, drags_onto_a_strip,
-           drags_into, escape_cancels, chords, tab_keys, divider, tab_menu):
+           drags_into, escape_cancels, chords, tab_keys, divider, tab_menu,
+           drops_on_the_drawer, split_chords, tab_order):
     print(f"# {fn.__name__}")
     scenario(fn)
+
+# On X11 with no window manager, GTK puts a right-to-left window at
+# x = 1 - width, off the screen; sway puts it where it goes.
+print("# right_to_left")
+if WAYLAND:
+    scenario(right_to_left, env={"MLN_DEMO_RTL": "1"})
+else:
+    print("skip  right to left: Wayland only (MLN_WAYLAND=1); unmanaged X11 "
+          "puts the window off the screen")
 
 print(f"\n{failures} failed" if failures else "\nall passed")
 sys.exit(1 if failures else 0)
