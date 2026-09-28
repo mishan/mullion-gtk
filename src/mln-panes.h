@@ -113,7 +113,7 @@ MLN_EXPORT gboolean    mln_panes_get_leaf_bounds (MlnPanes *self, const char *id
 
 /* Where a closed pane's button in the drawer is. FALSE for a pane that
    is not closed, or a drawer that is not shown. */
-gboolean    mln_panes_get_closed_bounds (MlnPanes *self, const char *id,
+MLN_EXPORT gboolean    mln_panes_get_closed_bounds (MlnPanes *self, const char *id,
                                          graphene_rect_t *bounds);
 
 /* The drawer: panes in play that the layout does not hold. */
