@@ -18,7 +18,7 @@ option(MLN_TESTS "Build and register the tests" ${PROJECT_IS_TOP_LEVEL})
 # Built into an app (add_subdirectory, FetchContent), it installs nothing
 # into the app's prefix.
 option(MLN_INSTALL "Install the library, headers and pkg-config file" ${PROJECT_IS_TOP_LEVEL})
-set(MLN_SHOTBOX "" CACHE PATH "A shotbox checkout, for the widget tests")
+set(MLN_SHOTBOX "" CACHE PATH "A shotbox checkout for the widget tests, in place of the installed shotbox")
 
 set(MLN_SOURCES src/mln-json.c src/mln-model.c src/mln-panes.c)
 
@@ -130,8 +130,12 @@ if(MLN_TESTS)
       COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/widget.py
               $<TARGET_FILE:mullion-demo>)
     # 77 is the widget suite saying it was skipped (no shotbox).
+    set(widget_env "MESON_BUILD_ROOT=${CMAKE_CURRENT_BINARY_DIR}")
+    if(MLN_SHOTBOX)
+      list(APPEND widget_env "PYTHONPATH=${MLN_SHOTBOX}")
+    endif()
     set_tests_properties(widget PROPERTIES
-      ENVIRONMENT "PYTHONPATH=${MLN_SHOTBOX};MESON_BUILD_ROOT=${CMAKE_CURRENT_BINARY_DIR}"
+      ENVIRONMENT "${widget_env}"
       SKIP_RETURN_CODE 77
       TIMEOUT 900
       RUN_SERIAL TRUE)

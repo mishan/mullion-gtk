@@ -88,22 +88,31 @@ comes back without its slots.
 With meson:
 
 ```sh
-meson setup build -Dshotbox=/path/to/shotbox
+meson setup build
 meson test -C build
 ```
 
 or with CMake:
 
 ```sh
-cmake -S . -B build -G Ninja -DMLN_SHOTBOX=/path/to/shotbox
+cmake -S . -B build -G Ninja
 cmake --build build && ctest --test-dir build
 ```
 
 Either builds a static `libmullion-gtk-0` by default, installs
 `mullion-gtk-0.pc` and the headers under `include/mullion-gtk-0/`, and
-runs the same tests. The widget tests drive the demo in a real window with
-[shotbox](https://github.com/mishan/shotbox) and are skipped without it.
-`-Db_sanitize=address,undefined` is how the tests are meant to be run.
+runs the same tests. `-Db_sanitize=address,undefined` is how the tests are
+meant to be run.
+
+The widget tests drive the demo in a real window with
+[shotbox](https://github.com/mishan/shotbox), and are skipped without it:
+
+```sh
+pipx install --system-site-packages shotbox
+```
+
+or `pip install shotbox`. To run them against a shotbox checkout instead,
+give it with `-Dshotbox=/path/to/shotbox` or `-DMLN_SHOTBOX=/path/to/shotbox`.
 
 ## Using it
 
