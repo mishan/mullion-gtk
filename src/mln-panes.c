@@ -217,7 +217,13 @@ static const char *STYLE =
   "  background-color: @theme_selected_bg_color;"
   "  border: none;"
   "}"
-  "panes > .panedrawer > button.paneclosed { padding: 1px 8px; min-height: 22px; }";
+  "panes > .panedrawer > button.paneclosed { padding: 1px 8px; min-height: 22px; }"
+  "label.panedragicon {"
+  "  padding: 4px 10px;"
+  "  background-color: @theme_bg_color;"
+  "  border: 1px solid alpha(@borders, 0.8);"
+  "  border-radius: 4px;"
+  "}";
 
 /* Between the theme (200) and the settings and the app (400, 600). */
 #define STYLE_PRIORITY 250
@@ -340,6 +346,7 @@ struct _MlnPanes
      where it would land, and the widget that shows where. */
   char *drag_id;
   gboolean dragging;
+  gboolean handing_off;         /* hand_off is ending the gesture */
   Drop drop;
   GtkWidget *hint;
 
@@ -947,9 +954,15 @@ reopen_button (MlnPanes *self, const char *id)
 static void
 fill_drawer (MlnPanes *self)
 {
-  GPtrArray *closed = mln_model_closed (self->model);
+  GPtrArray *closed;
   GtkWidget *child;
   char *had = NULL;
+
+  /* The drawer is the main window's. */
+  if (self->owner != NULL)
+    return;
+
+  closed = mln_model_closed (self->model);
 
   /* The buttons are made again; the one with the focus is given it back. */
   for (child = gtk_widget_get_first_child (self->drawer); child != NULL;
@@ -1629,6 +1642,144 @@ end_drag (MlnPanes *self)
   gtk_widget_queue_resize (GTK_WIDGET (self));
 }
 
+/* ---- dragging a tab out of a window, and into another ---- */
+
+/* What a drag between windows carries: which pane, and whose. A type of
+   its own, so that it is offered to nothing outside this process -- a
+   drop on another app is no drop -- and is read back here as it was. */
+typedef struct
+{
+  MlnPanes *home;               /* the main MlnPanes, compared, not held */
+  char *id;
+} MlnPaneRef;
+
+static MlnPaneRef *
+pane_ref_copy (const MlnPaneRef *r)
+{
+  MlnPaneRef *c = g_new0 (MlnPaneRef, 1);
+
+  c->home = r->home;
+  c->id = g_strdup (r->id);
+
+  return c;
+}
+
+static void
+pane_ref_free (MlnPaneRef *r)
+{
+  g_free (r->id);
+  g_free (r);
+}
+
+G_DEFINE_BOXED_TYPE (MlnPaneRef, mln_pane_ref, pane_ref_copy, pane_ref_free)
+
+static void
+on_handoff_cancel (GdkDrag *drag, GdkDragCancelReason reason, gpointer data)
+{
+  MlnPaneRef *ref = data;
+
+  /* Let go over nothing that takes it: into a window of its own. X11
+     says there was no target; Wayland, that there was an error. Escape
+     is a cancel, and is left one. */
+  if ((reason == GDK_DRAG_CANCEL_NO_TARGET || reason == GDK_DRAG_CANCEL_ERROR) &&
+      MLN_IS_PANES (ref->home) && mln_model_has (ref->home->model, ref->id))
+    mln_panes_undock (ref->home, ref->id);
+}
+
+static void
+handoff_done (gpointer data, GClosure *closure)
+{
+  MlnPaneRef *ref = data;
+
+  if (ref->home != NULL)
+    g_object_remove_weak_pointer (G_OBJECT (ref->home), (gpointer *) &ref->home);
+
+  pane_ref_free (ref);
+}
+
+/* The pointer has left the window with a tab: the gesture that was the
+   drag inside it ends, and a drag that other windows can take begins. */
+static void
+hand_off (MlnPanes *self, GtkGestureDrag *g, Pane *p, double x, double y)
+{
+  GtkNative *native = gtk_widget_get_native (GTK_WIDGET (self));
+  GdkDevice *device = gtk_gesture_get_device (GTK_GESTURE (g));
+  MlnPaneRef ref = { main_of (self), p->id };
+  GdkContentProvider *content;
+  MlnPaneRef *held;
+  GdkDrag *drag;
+  double sx = 0, sy = 0;
+
+  if (native == NULL || device == NULL)
+    return;
+
+  self->handing_off = TRUE;
+  gtk_event_controller_reset (GTK_EVENT_CONTROLLER (g));
+  self->handing_off = FALSE;
+  end_drag (self);
+
+  content = gdk_content_provider_new_typed (mln_pane_ref_get_type (), &ref);
+  gtk_native_get_surface_transform (native, &sx, &sy);
+  drag = gdk_drag_begin (gtk_native_get_surface (native), device, content,
+                         GDK_ACTION_MOVE, x + sx, y + sy);
+  g_object_unref (content);
+
+  if (drag == NULL)
+    return;
+
+  {
+    GtkWidget *label = gtk_label_new (p->title);
+
+    gtk_widget_add_css_class (label, "panedragicon");
+    gtk_drag_icon_set_child (GTK_DRAG_ICON (gtk_drag_icon_get_for_drag (drag)), label);
+  }
+
+  held = pane_ref_copy (&ref);
+  g_object_add_weak_pointer (G_OBJECT (held->home), (gpointer *) &held->home);
+  g_signal_connect_data (drag, "cancel", G_CALLBACK (on_handoff_cancel), held,
+                         handoff_done, 0);
+  g_object_unref (drag);
+}
+
+/* A pane's drag over one of the windows: where it would land. */
+static GdkDragAction
+on_drop_motion (GtkDropTarget *target, double x, double y, gpointer data)
+{
+  MlnPanes *self = data;
+  const GValue *v = gtk_drop_target_get_value (target);
+  MlnPaneRef *ref = v != NULL ? g_value_get_boxed (v) : NULL;
+
+  if (ref == NULL || ref->home != main_of (self) || !mln_model_has (self->model, ref->id))
+    return 0;
+
+  if (!self->dragging || g_strcmp0 (self->drag_id, ref->id) != 0)
+    {
+      g_free (self->drag_id);
+      self->drag_id = g_strdup (ref->id);
+      self->dragging = TRUE;
+      gtk_widget_add_css_class (GTK_WIDGET (self), "panedrag");
+      gtk_widget_insert_before (self->hint, GTK_WIDGET (self), NULL);
+      fill_drawer (self);
+      gtk_widget_queue_resize (GTK_WIDGET (self));
+    }
+
+  under (self, x, y, &self->drop);
+  show_hint (self);
+
+  return self->drop.kind != DROP_NONE ? GDK_ACTION_MOVE : 0;
+}
+
+static void
+on_drop_leave (GtkDropTarget *target, gpointer data)
+{
+  end_drag (data);
+}
+
+static gboolean land (gpointer data);
+
+static gboolean
+on_drop (GtkDropTarget *target, const GValue *value, double x, double y, gpointer data);
+
 static void
 on_tab_drag_begin (GtkGestureDrag *g, double x, double y, gpointer data)
 {
@@ -1672,6 +1823,21 @@ on_tab_drag_update (GtkGestureDrag *g, double ox, double oy, gpointer data)
                                  &GRAPHENE_POINT_INIT (sx + ox, sy + oy), &at))
     return;
 
+  /* Out of the window: a drag between windows from here on. */
+  {
+    GtkNative *native = gtk_widget_get_native (GTK_WIDGET (self));
+    graphene_point_t n;
+
+    if (native != NULL &&
+        gtk_widget_compute_point (GTK_WIDGET (self), GTK_WIDGET (native), &at, &n) &&
+        (n.x < 0 || n.y < 0 || n.x >= gtk_widget_get_width (GTK_WIDGET (native)) ||
+         n.y >= gtk_widget_get_height (GTK_WIDGET (native))))
+      {
+        hand_off (self, g, p, n.x, n.y);
+        return;
+      }
+  }
+
   under (self, at.x, at.y, &self->drop);
   show_hint (self);
 }
@@ -1681,6 +1847,7 @@ typedef struct
   MlnPanes *self;
   char *id;
   Drop drop;
+  gboolean across;              /* dropped from another window */
 } Landing;
 
 /* The move, after the gesture that asked for it has finished: it can take
@@ -1727,8 +1894,19 @@ land (gpointer data)
 
       render (self);
 
+      /* The window it landed in in front -- another one, for a drag
+         between windows -- with its tab focused. */
       if (leaf != NULL)
-        gtk_widget_grab_focus (pane_of (self, l->id)->tab);
+        {
+          GtkWidget *tab = pane_of (self, l->id)->tab;
+          GtkRoot *root = gtk_widget_get_root (tab);
+
+          if (root != NULL && GTK_IS_WINDOW (root) &&
+              (l->across || root != gtk_widget_get_root (GTK_WIDGET (self))))
+            gtk_window_present (GTK_WINDOW (root));
+
+          gtk_widget_grab_focus (tab);
+        }
     }
 
   drop_clear (&l->drop);
@@ -1744,6 +1922,10 @@ on_tab_drag_end (GtkGestureDrag *g, double ox, double oy, gpointer data)
 {
   MlnPanes *self = tab_panes (data, g);
   Landing *l;
+
+  /* Ended by hand_off, which has a drag of its own going. */
+  if (self->handing_off)
+    return;
 
   if (!self->dragging || self->drop.kind == DROP_NONE)
     {
@@ -1762,6 +1944,45 @@ on_tab_drag_end (GtkGestureDrag *g, double ox, double oy, gpointer data)
   /* A leaf that has left the tree since the pointer last moved is a drop
      on nothing (land asks the model). */
   g_idle_add (land, l);
+}
+
+static gboolean
+on_drop (GtkDropTarget *target, const GValue *value, double x, double y, gpointer data)
+{
+  MlnPanes *self = data;
+  MlnPaneRef *ref = g_value_get_boxed (value);
+  Landing *l;
+
+  if (ref == NULL || ref->home != main_of (self) || !mln_model_has (self->model, ref->id))
+    {
+      end_drag (self);
+      return FALSE;
+    }
+
+  g_free (self->drag_id);
+  self->drag_id = g_strdup (ref->id);
+  under (self, x, y, &self->drop);
+
+  if (self->drop.kind == DROP_NONE)
+    {
+      end_drag (self);
+      return FALSE;
+    }
+
+  l = g_new0 (Landing, 1);
+  l->self = g_object_ref (self);
+  l->id = g_strdup (ref->id);
+  l->drop = self->drop;
+  l->drop.before = g_strdup (self->drop.before);
+  l->across = TRUE;
+  mln_node_ref (l->drop.leaf);
+  end_drag (self);
+
+  /* After the drop has been answered, as a drop inside a window is: the
+     move can close the window the drag came from. */
+  g_idle_add (land, l);
+
+  return TRUE;
 }
 
 /* ---- the keys ---- */
@@ -2916,6 +3137,16 @@ mln_panes_init (MlnPanes *self)
     gtk_event_controller_set_propagation_phase (keys, GTK_PHASE_BUBBLE);
     g_signal_connect (keys, "key-pressed", G_CALLBACK (on_key), self);
     gtk_widget_add_controller (GTK_WIDGET (self), keys);
+  }
+
+  {
+    GtkDropTarget *target = gtk_drop_target_new (mln_pane_ref_get_type (), GDK_ACTION_MOVE);
+
+    gtk_drop_target_set_preload (target, TRUE);
+    g_signal_connect (target, "motion", G_CALLBACK (on_drop_motion), self);
+    g_signal_connect (target, "leave", G_CALLBACK (on_drop_leave), self);
+    g_signal_connect (target, "drop", G_CALLBACK (on_drop), self);
+    gtk_widget_add_controller (GTK_WIDGET (self), GTK_EVENT_CONTROLLER (target));
   }
 
   self->blank = gtk_label_new ("Every pane is closed. Reopen one from the row above.");

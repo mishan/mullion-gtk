@@ -20,21 +20,37 @@ Work in progress. What is here so far:
   (`tests/layouts.json`, copied from mullion's `test/layouts.json`; keep
   the two the same).
 
+## Floating windows
+
+A pane can go into a window of its own: its tab menu's Move to New
+Window, `mln_panes_undock`, or a tab dragged out of the window and let go
+over nothing. Tabs drag between windows as within one, splits and all,
+and closing a floating window puts what was in it back where it was.
+The app can make the windows (`mln_panes_set_window_func`); otherwise
+each is transient for the main window and of its application. They are
+kept with the layout, with their sizes. Positions are not: Wayland does
+not give them, and X11's are the window manager's.
+
 ## What it adds to mullion's layouts
 
-Two fields mullion does not write and reads past, for what a desktop app
+Fields mullion does not write and reads past, for what a desktop app
 needs that a page does not:
 
 - `"slots"` on a leaf: names for where a pane goes when nothing remembers
   where it was (`mln_panes_set_placement`). A leaf that empties hands its
   slots to the leaf that takes its room.
+- `"floating"` in the envelope: the floating windows, each
+  `{"layout":…,"size":[w,h]}`. mullion has none, and a layout kept with
+  one is read by mullion as the main window's alone -- or, with no
+  version, as no layout (below).
 - `"closed"` in the envelope: the panes a person closed that the app opens
   wherever a layout does not have them, so that a pane new in a release
   comes up in a layout kept by the one before, and one a person closed
-  stays closed. It is written only when there are any, in the version's
-  envelope where the app gives a version and in one of its own
-  (`{"layout":…,"closed":[…]}`) where it does not. mullion reads that one
-  as no layout.
+  stays closed.
+
+Both are written only when there are any, in the version's envelope where
+the app gives a version and in one of their own (`{"layout":…}` with
+them) where it does not. mullion reads that one as no layout.
 
 A layout that uses neither is written exactly as mullion writes it. One
 kept by mullion has neither: a layout that goes through the web and back

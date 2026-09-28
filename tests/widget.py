@@ -395,6 +395,57 @@ def floats(d):
     check("window" not in d.geometry()["console"], "the window is gone")
 
 
+def drag_across(d, src, x1, y1, dst, to):
+    """A tab dragged from window `src' to a point `to' in window `dst' (or,
+    for dst None, on the screen), as slowly as a drag in one window."""
+    xt = d.s.xt
+    _, _, _, _, sx, sy = d.s.wait_window(src)
+    x1, y1 = int(x1 + sx), int(y1 + sy)
+    xt.move(x1 - 6, y1)
+    time.sleep(0.1)
+    xt.move(x1, y1)
+    time.sleep(0.15)
+    d.press(True)
+    time.sleep(0.1)
+    for i in range(1, 6):
+        xt.move(x1 + 3 * i, y1 + 3 * i)
+        time.sleep(0.03)
+    time.sleep(0.3)
+    if dst is not None:
+        _, _, _, _, dx, dy = d.s.wait_window(dst)
+        x2, y2 = int(to[0] + dx), int(to[1] + dy)
+    else:
+        x2, y2 = to
+    x0, y0 = x1 + 15, y1 + 15
+    for i in range(1, 31):
+        xt.move(x0 + (x2 - x0) * i // 30, y0 + (y2 - y0) * i // 30)
+        time.sleep(0.04)
+    time.sleep(0.5)
+    d.press(False)
+    time.sleep(0.8)
+    d.settle()
+
+
+def drags_out_and_in(d):
+    _, _, w, h, _, _ = d.s.wait_window(W)
+    x, y = d.centre("console")
+    drag_across(d, W, x, y, None, (w + 60, 40))        # off the window's right
+    d.s.wait_window("Console")
+    d.settle()
+    g = d.geometry()
+    check(g["console"].get("window") == "Console",
+          f"a tab dragged out of the window and let go over nothing floats: {g['console']}")
+
+    # From its window into the middle of the inspector's leaf, in the main
+    # one -- the middle, which the drawer's drop row coming up during the
+    # drag does not move off.
+    x, y = d.centre("console")
+    drag_across(d, "Console", x, y, W, d.centre("inspector", "leaf"))
+    k = d.kept()
+    check("floating" not in k and tabs(k)[-1] == (["inspector", "console"], 1),
+          f"and dragged into another window's leaf, it lands there: {k}")
+
+
 def floats_kept(d):
     g = d.geometry()
     check(g["inspector"].get("window") == "Inspector",
@@ -426,6 +477,9 @@ for fn in (starts, raises, closes_and_reopens, drags_beside, drags_onto_a_strip,
 # x = 1 - width, off the screen; sway puts it where it goes.
 print("# floats")
 scenario(floats)
+
+print("# drags_out_and_in")
+scenario(drags_out_and_in)
 
 print("# floats_kept")
 scenario(floats_kept, env={"MLN_DEMO_LAYOUT": json.dumps({
