@@ -52,6 +52,11 @@ typedef enum
   MLN_PANE_QUIET     = 1 << 1,  /* added behind what is in front */
 } MlnPaneFlags;
 
+/* A floating window for panes undocked from `panes', made by the app so
+   that it can give it an application, a title, its keys. NULL: one is
+   made, transient for the window `panes' is in and of its application. */
+typedef GtkWindow *(*MlnWindowFunc) (MlnPanes *panes, gpointer data);
+
 /* Whether the app will add a pane later, so a kept layout keeps its
    place. */
 typedef gboolean (*MlnLaterFunc) (const char *id, gpointer data);
@@ -92,6 +97,16 @@ MLN_EXPORT void        mln_panes_set_attention (MlnPanes *self, const char *id,
    so the app's window and application actions work. NULL for none. */
 MLN_EXPORT void        mln_panes_set_pane_menu (MlnPanes *self, const char *id,
                                      GMenuModel *menu);
+/* Where a pane goes when nothing remembers where it was: the leaf whose
+   "slots" in the layout name `slot' (NULL: none), ahead of the leaf the
+   person was working in. If `open', it is also put there whenever a
+   layout is loaded or reset without it -- a pane new since the layout was
+   kept comes up -- unless the kept layout lists it as closed: a person
+   closed it, and it stays closed. Call it before mln_panes_load, with the
+   panes: called after, it takes effect from the next load or reset. May
+   be called before the pane is registered or added. */
+MLN_EXPORT void        mln_panes_set_placement (MlnPanes *self, const char *id,
+                                     const char *slot, gboolean open);
 MLN_EXPORT void        mln_panes_set_later_func (MlnPanes *self, MlnLaterFunc func,
                                       gpointer data, GDestroyNotify destroy);
 
@@ -103,9 +118,10 @@ MLN_EXPORT void        mln_panes_close         (MlnPanes *self, const char *id);
 /* Whether it is in front of somebody: what ::pane-shown last said. */
 MLN_EXPORT gboolean    mln_panes_is_visible    (MlnPanes *self, const char *id);
 
-/* Where a pane's tab, and the leaf holding it, are drawn, in this
-   widget's coordinates: for a popover anchored on a tab, and for tests.
-   FALSE for a pane not drawn. */
+/* Where a pane's tab, and the leaf holding it, are drawn, in the
+   coordinates of the MlnPanes that draws them: this one, or the one in the
+   floating window the pane is in (see mln_panes_get_window). For a
+   popover anchored on a tab, and for tests. FALSE for a pane not drawn. */
 MLN_EXPORT gboolean    mln_panes_get_tab_bounds  (MlnPanes *self, const char *id,
                                        graphene_rect_t *bounds);
 MLN_EXPORT gboolean    mln_panes_get_leaf_bounds (MlnPanes *self, const char *id,
@@ -115,6 +131,22 @@ MLN_EXPORT gboolean    mln_panes_get_leaf_bounds (MlnPanes *self, const char *id
    is not closed, or a drawer that is not shown. */
 MLN_EXPORT gboolean    mln_panes_get_closed_bounds (MlnPanes *self, const char *id,
                                          graphene_rect_t *bounds);
+
+/* ---- floating windows ---- */
+
+/* How a floating window is made (see MlnWindowFunc). */
+MLN_EXPORT void        mln_panes_set_window_func (MlnPanes *self, MlnWindowFunc func,
+                                       gpointer data, GDestroyNotify destroy);
+
+/* A pane into a window of its own, as its tab menu's Move to New Window
+   does; and out of one, back where it was in the main window. Closing a
+   floating window docks what was in it. Floating windows are kept with
+   the layout, size and all, and come back when it is loaded. */
+MLN_EXPORT void        mln_panes_undock        (MlnPanes *self, const char *id);
+MLN_EXPORT void        mln_panes_dock          (MlnPanes *self, const char *id);
+
+/* The floating window a pane is in, or NULL. */
+MLN_EXPORT GtkWindow  *mln_panes_get_window    (MlnPanes *self, const char *id);
 
 /* The drawer: panes in play that the layout does not hold. */
 MLN_EXPORT char      **mln_panes_get_closed    (MlnPanes *self);

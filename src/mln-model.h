@@ -109,6 +109,17 @@ MlnNode    *mln_model_add           (MlnModel *m, const char *id, double min,
                                      gboolean keep, const char *near,
                                      gboolean take, gboolean *added);
 
+/* Where a pane goes when nothing remembers where it was: the leaf with
+   `slot' in its "slots" (NULL: none, or none in the tree), before the
+   leaf last focused. And, if `open', it is put there when a layout is
+   loaded or reset without it, unless the kept layout lists it as closed:
+   a pane new since the layout was kept comes up, and one a person closed
+   stays closed. Set it before mln_model_load, as the app registers its
+   panes: set after, it takes effect from the next load or reset. May be
+   set before the pane is taken on. */
+void        mln_model_set_placement (MlnModel *m, const char *id,
+                                     const char *slot, gboolean open);
+
 /* No longer a pane (mullion's `remove'). TRUE if it was one. */
 gboolean    mln_model_remove        (MlnModel *m, const char *id);
 
@@ -147,7 +158,8 @@ char       *mln_model_save          (MlnModel *m);
 char       *mln_model_json          (MlnModel *m);
 
 /* A layout put up by the app (mullion's `setLayout'). FALSE, and nothing
-   changed, if it is not one. */
+   changed, if it is not one. It is the whole layout: floating windows
+   close, and what was in them is where it puts it, or closed. */
 gboolean    mln_model_set_layout    (MlnModel *m, const char *json);
 
 /* Back to the mode's default, forgetting what was kept. */
@@ -207,6 +219,44 @@ void        mln_model_equalize      (MlnModel *m, MlnNode *split);
 /* A change made in steps (a divider dragged) is one change: kept and
    told of if the tree is not what it was. */
 void        mln_model_commit        (MlnModel *m);
+
+/* ---- floating windows ---- */
+
+/* Each floating window is a tree of its own, kept with the main one (as
+   "floating" in the envelope) and known by an id that is never reused.
+   The operations above work on a leaf in any of the trees; zoom is the
+   main tree's only. */
+
+/* The ids of the floating windows, in the order made. Free with
+   g_array_unref. */
+GArray     *mln_model_floats        (MlnModel *m);
+MlnNode    *mln_model_float_root    (MlnModel *m, guint id);
+
+/* The floating window holding a node, or 0 for the main tree or none. */
+guint       mln_model_float_of      (MlnModel *m, MlnNode *node);
+
+/* The size a floating window was last given, 0 by 0 for none yet; set
+   by the widget as it is resized. Not a change: kept with the next one,
+   or by mln_model_keep. */
+gboolean    mln_model_float_size    (MlnModel *m, guint id, int *w, int *h);
+void        mln_model_set_float_size (MlnModel *m, guint id, int w, int h);
+
+/* The layout kept as it is now, changed or not: for what is kept without
+   being a change, a window's size. */
+void        mln_model_keep          (MlnModel *m);
+
+/* A pane into a floating window of its own, `w' by `h'. The window's id,
+   or 0 if it is not a pane in play or there is no layout. One change. */
+guint       mln_model_undock        (MlnModel *m, const char *id, int w, int h);
+
+/* A floating window closed: its panes back into the main tree, each
+   where it was before it left, or at its slot, or in the leaf last
+   focused. One change. */
+void        mln_model_dock          (MlnModel *m, guint id);
+
+/* One pane out of a floating window, back into the main tree the same
+   way, and its leaf the focus. One change. */
+void        mln_model_dock_pane     (MlnModel *m, const char *id);
 
 /* ---- asking about the tree ---- */
 

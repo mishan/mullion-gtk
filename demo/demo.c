@@ -11,11 +11,16 @@
 
 #include <stdio.h>
 
+#ifdef G_OS_UNIX
+#include <glib-unix.h>
+#include <signal.h>
+#endif
+
 static const char *LAYOUT =
   "{\"dir\":\"row\",\"size\":[0.62,0.38],\"kids\":["
   "{\"dir\":\"col\",\"size\":[0.7,0.3],\"kids\":["
   "{\"tabs\":[\"editor\",\"drawing\"]},{\"tabs\":[\"console\"]}]},"
-  "{\"tabs\":[\"inspector\"]}]}";
+  "{\"tabs\":[\"inspector\"],\"slots\":[\"side\"]}]}";
 
 static GtkWidget *
 text (const char *what)
@@ -44,7 +49,8 @@ shown (MlnPanes *panes, const char *id, gboolean on, gpointer data)
   g_print ("pane-shown %s %s\n", id, on ? "on" : "off");
 }
 
-static const char *IDS[] = { "editor", "console", "inspector", "drawing" };
+/* notes only with MLN_DEMO_PLACEMENT; without it, it has no parts. */
+static const char *IDS[] = { "editor", "console", "inspector", "drawing", "notes" };
 
 /* Where everything is, on one line, once the layout has been drawn: for a
    harness that clicks and drags, which cannot know the fonts. */
@@ -56,24 +62,33 @@ geometry (GtkWidget *widget, GdkFrameClock *clock, gpointer data)
   MlnPanes *panes = MLN_PANES (widget);
   GString *out = g_string_new ("geometry {");
   graphene_rect_t r;
-  double x = 0, y = 0;
-  GtkNative *native = gtk_widget_get_native (GTK_WIDGET (panes));
-  graphene_point_t at;
-
-  /* In the window's coordinates, which is what a harness clicks in. */
-  if (native != NULL &&
-      gtk_widget_compute_point (GTK_WIDGET (panes), GTK_WIDGET (native),
-                                &GRAPHENE_POINT_INIT (0, 0), &at))
-    {
-      x = at.x;
-      y = at.y;
-    }
 
   for (guint i = 0; i < G_N_ELEMENTS (IDS); i++)
     {
       const char *sep = "";
+      GtkWindow *win = mln_panes_get_window (panes, IDS[i]);
+      GtkWidget *drawn = win != NULL ? gtk_window_get_child (win) : widget;
+      GtkNative *native = gtk_widget_get_native (drawn);
+      graphene_point_t at;
+      double x = 0, y = 0;
+
+      /* In the coordinates of the window it is in, which is what a
+         harness clicks in; and which window that is, by title. */
+      if (native != NULL &&
+          gtk_widget_compute_point (drawn, GTK_WIDGET (native),
+                                    &GRAPHENE_POINT_INIT (0, 0), &at))
+        {
+          x = at.x;
+          y = at.y;
+        }
 
       g_string_append_printf (out, "%s\"%s\":{", i ? "," : "", IDS[i]);
+
+      if (win != NULL)
+        {
+          g_string_append_printf (out, "\"window\":\"%s\"", gtk_window_get_title (win));
+          sep = ",";
+        }
 
 #define PART(name, get)                                                    \
       if (get (panes, IDS[i], &r))                                          \
@@ -145,6 +160,41 @@ quit (GSimpleAction *action, GVariant *param, gpointer app)
   g_application_quit (G_APPLICATION (app));
 }
 
+#ifdef G_OS_UNIX
+static gboolean
+term (gpointer app)
+{
+  g_print ("quit-on-term\n");
+  g_application_quit (G_APPLICATION (app));
+
+  return G_SOURCE_REMOVE;
+}
+#endif
+
+/* A floating window with a titlebar of its own, as an app's may have: its
+   size is the window's, titlebar and all. */
+static GtkWindow *
+make_window (MlnPanes *panes, gpointer app)
+{
+  GtkWidget *win = gtk_window_new ();
+
+  gtk_window_set_application (GTK_WINDOW (win), app);
+  gtk_window_set_titlebar (GTK_WINDOW (win), gtk_header_bar_new ());
+
+  return GTK_WINDOW (win);
+}
+
+/* A harness's way to destroy a floating window as an app might, not by
+   closing it. */
+static void
+destroy_console (GSimpleAction *action, GVariant *param, gpointer panes)
+{
+  GtkWindow *win = mln_panes_get_window (panes, "console");
+
+  if (win != NULL)
+    gtk_window_destroy (win);
+}
+
 static void
 clear_console (GSimpleAction *action, GVariant *param, gpointer data)
 {
@@ -176,6 +226,16 @@ activate (GtkApplication *app)
                       text ("width  240\nheight  64\n"), 160);
   mln_panes_register (MLN_PANES (panes), "drawing", "Drawing", drawing, 120);
 
+  /* A pane the layout above does not have, opened in the side slot
+     wherever a layout does not have it: what a pane new in a release
+     does to a layout kept by the one before. */
+  if (g_getenv ("MLN_DEMO_PLACEMENT") != NULL)
+    {
+      mln_panes_register (MLN_PANES (panes), "notes", "Notes",
+                          text ("remember the milk\n"), 120);
+      mln_panes_set_placement (MLN_PANES (panes), "notes", "side", TRUE);
+    }
+
   g_signal_connect (panes, "pane-shown", G_CALLBACK (shown), NULL);
   g_signal_connect (panes, "layout-kept", G_CALLBACK (kept), NULL);
   gtk_widget_add_tick_callback (panes, geometry, NULL, NULL);
@@ -196,6 +256,19 @@ activate (GtkApplication *app)
 
   if (g_getenv ("MLN_DEMO_ATTENTION") != NULL)
     mln_panes_set_attention (MLN_PANES (panes), g_getenv ("MLN_DEMO_ATTENTION"), TRUE);
+
+  if (g_getenv ("MLN_DEMO_HEADERBAR") != NULL)
+    mln_panes_set_window_func (MLN_PANES (panes), make_window, app, NULL);
+
+  {
+    GSimpleAction *d = g_simple_action_new ("destroy-console", NULL);
+
+    g_signal_connect (d, "activate", G_CALLBACK (destroy_console), panes);
+    g_action_map_add_action (G_ACTION_MAP (app), G_ACTION (d));
+    gtk_application_set_accels_for_action (app, "app.destroy-console",
+                                           (const char *[]) { "<Control>d", NULL });
+    g_object_unref (d);
+  }
 
   mln_panes_set_default (MLN_PANES (panes), "main", LAYOUT);
   mln_panes_set_mode (MLN_PANES (panes), "main");
@@ -233,6 +306,13 @@ main (int argc, char **argv)
                                              G_APPLICATION_DEFAULT_FLAGS);
 
   g_signal_connect (app, "activate", G_CALLBACK (activate), NULL);
+
+#ifdef G_OS_UNIX
+  /* A harness's way out when the keys do not reach the window -- X11 with
+     no window manager leaves the focus nowhere once the window that had
+     it is gone -- by the same quit Ctrl Q is. */
+  g_unix_signal_add (SIGTERM, (GSourceFunc) term, app);
+#endif
 
   return g_application_run (G_APPLICATION (app), argc, argv);
 }

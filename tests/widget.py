@@ -74,11 +74,15 @@ class Demo:
         return f[-1] if f else None
 
     def quit(self):
-        """Ctrl Q, and wait for it to go: dispose runs, under ASan."""
+        """Ctrl Q, and wait for it to go: dispose runs, under ASan. Where
+        the key reaches no window, the same quit by SIGTERM (see the
+        demo's main)."""
         self.s.key("ctrl+q")
-        for _ in range(100):
+        for tries in range(160):
             if self.proc.poll() is not None:
                 return self.proc.returncode
+            if tries == 60:
+                self.proc.terminate()
             time.sleep(0.1)
         return None
 
@@ -354,6 +358,129 @@ def tab_order(d):
           f"and only the front tabs' crosses: {seen}")
 
 
+def placed(d):
+    k = d.kept()
+    check(tabs(k)[-1] == (["inspector", "notes"], 0),
+          f"a pane opened by placement comes up in its slot, behind: {tabs(k)}")
+    d.click(*d.centre("notes"))
+    x, y, w, h = d.geometry()["notes"]["tab"]
+    d.click(x + w - 14, y + h / 2)      # its cross
+    k = d.kept()
+    check(k.get("closed") == ["notes"] and "layout" in k and
+          all("notes" not in t for t, _ in tabs(k["layout"])),
+          f"closed, it is kept as closed: {k}")
+
+
+def floats(d):
+    x, y = d.centre("console")
+    d.s.click(int(x), int(y), window=W, button=3)
+    time.sleep(0.5)
+    d.key("n")                          # Move to _New Window
+    d.s.wait_window("Console")
+    d.settle()
+    g = d.geometry()
+    k = d.kept()
+    check(g["console"].get("window") == "Console" and "tab" in g["console"],
+          f"a tab's menu moves its pane into a window of its own: {g['console']}")
+    check("floating" in k and tabs(k["floating"][0]["layout"]) == [(["console"], 0)] and
+          all("console" not in t for t, _ in tabs(k["layout"])),
+          f"which is kept with the layout: {k}")
+    check("console" in d.shown(), "and the pane in it is in view")
+
+    # Its own tab menu, in its own window: back where it came from.
+    x, y = d.centre("console")
+    d.s.click(int(x), int(y), window="Console", button=3)
+    time.sleep(0.5)
+    d.s.key("m")                        # Move to _Main Window
+    d.settle()
+    k = d.kept()
+    check("floating" not in k and tabs(k)[1] == (["console"], 0),
+          f"and its menu moves it back, where it was: {k}")
+    check("window" not in d.geometry()["console"], "the window is gone")
+
+
+def drag_across(d, src, x1, y1, dst, to):
+    """A tab dragged from window `src' to a point `to' in window `dst' (or,
+    for dst None, on the screen), as slowly as a drag in one window."""
+    xt = d.s.xt
+    _, _, _, _, sx, sy = d.s.wait_window(src)
+    x1, y1 = int(x1 + sx), int(y1 + sy)
+    xt.move(x1 - 6, y1)
+    time.sleep(0.1)
+    xt.move(x1, y1)
+    time.sleep(0.15)
+    d.press(True)
+    time.sleep(0.1)
+    for i in range(1, 6):
+        xt.move(x1 + 3 * i, y1 + 3 * i)
+        time.sleep(0.03)
+    time.sleep(0.3)
+    if dst is not None:
+        _, _, _, _, dx, dy = d.s.wait_window(dst)
+        x2, y2 = int(to[0] + dx), int(to[1] + dy)
+    else:
+        x2, y2 = to
+    x0, y0 = x1 + 15, y1 + 15
+    for i in range(1, 31):
+        xt.move(x0 + (x2 - x0) * i // 30, y0 + (y2 - y0) * i // 30)
+        time.sleep(0.04)
+    time.sleep(0.5)
+    d.press(False)
+    time.sleep(0.8)
+    d.settle()
+
+
+def drags_out_and_in(d):
+    _, _, w, h, _, _ = d.s.wait_window(W)
+    x, y = d.centre("console")
+    drag_across(d, W, x, y, None, (w + 60, 40))        # off the window's right
+    d.s.wait_window("Console")
+    d.settle()
+    g = d.geometry()
+    check(g["console"].get("window") == "Console",
+          f"a tab dragged out of the window and let go over nothing floats: {g['console']}")
+
+    # From its window into the middle of the inspector's leaf, in the main
+    # one -- the middle, which the drawer's drop row coming up during the
+    # drag does not move off.
+    x, y = d.centre("console")
+    drag_across(d, "Console", x, y, W, d.centre("inspector", "leaf"))
+    k = d.kept()
+    check("floating" not in k and tabs(k)[-1] == (["inspector", "console"], 1),
+          f"and dragged into another window's leaf, it lands there: {k}")
+
+
+def floats_destroyed(d):
+    x, y = d.centre("console")
+    d.s.click(int(x), int(y), window=W, button=3)
+    time.sleep(0.5)
+    d.key("n")                          # Move to _New Window
+    d.s.wait_window("Console")
+    d.settle()
+    d.s.key("ctrl+d")                   # the demo destroys it, as an app might
+    time.sleep(1.0)
+    d.s.wait_window("Console")
+    d.settle()
+    g = d.geometry()
+    check(g["console"].get("window") == "Console" and "tab" in g["console"],
+          f"a floating window destroyed by the app comes back, pane and all: {g['console']}")
+    check("console" in d.shown(), "and the pane in it is in view")
+
+
+def floats_keep_their_size(d):
+    d.click(*d.centre("drawing"))       # a change, to keep the layout
+    k = d.kept()
+    check(k["floating"][0].get("size") == [300, 200],
+          f"a floating window with a titlebar keeps the size it was given: {k['floating']}")
+
+
+def floats_kept(d):
+    g = d.geometry()
+    check(g["inspector"].get("window") == "Inspector",
+          f"a kept layout's floating window comes up with it: {g['inspector']}")
+    check("inspector" in d.shown(), "with its pane in view")
+
+
 def right_to_left(d):
     ex, ey, ew, eh = d.geometry()["editor"]["leaf"]
     ix = d.geometry()["inspector"]["leaf"][0]
@@ -376,6 +503,30 @@ for fn in (starts, raises, closes_and_reopens, drags_beside, drags_onto_a_strip,
 
 # On X11 with no window manager, GTK puts a right-to-left window at
 # x = 1 - width, off the screen; sway puts it where it goes.
+print("# floats")
+scenario(floats)
+
+print("# drags_out_and_in")
+scenario(drags_out_and_in)
+
+print("# floats_destroyed")
+scenario(floats_destroyed)
+
+print("# floats_keep_their_size")
+scenario(floats_keep_their_size, env={"MLN_DEMO_HEADERBAR": "1", "MLN_DEMO_LAYOUT": json.dumps({
+    "layout": {"dir": "col", "size": [0.7, 0.3], "kids": [
+        {"tabs": ["editor", "drawing"]}, {"tabs": ["console"]}]},
+    "floating": [{"layout": {"tabs": ["inspector"]}, "size": [300, 200]}]})})
+
+print("# floats_kept")
+scenario(floats_kept, env={"MLN_DEMO_LAYOUT": json.dumps({
+    "layout": {"dir": "col", "size": [0.7, 0.3], "kids": [
+        {"tabs": ["editor", "drawing"]}, {"tabs": ["console"]}]},
+    "floating": [{"layout": {"tabs": ["inspector"]}, "size": [300, 200]}]})})
+
+print("# placed")
+scenario(placed, env={"MLN_DEMO_PLACEMENT": "1"})
+
 print("# right_to_left")
 if WAYLAND:
     scenario(right_to_left, env={"MLN_DEMO_RTL": "1"})
