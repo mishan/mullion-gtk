@@ -458,7 +458,10 @@ sane (const MlnJson *n)
     {
       const MlnJson *f = mln_json_index (size, i);
 
-      if (mln_json_type (f) != MLN_JSON_NUMBER || !(mln_json_number (f) > 0))
+      /* Finite, as in mullion: 1e999 reads as Infinity, and an Infinity
+         is written back as null, which does not read back. */
+      if (mln_json_type (f) != MLN_JSON_NUMBER || !isfinite (mln_json_number (f)) ||
+          !(mln_json_number (f) > 0))
         return FALSE;
     }
 

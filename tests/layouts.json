@@ -240,6 +240,86 @@
       "written": "{\"tabs\":[\"a\"],\"active\":0}"
     },
     {
+      "name": "a split left with one child is that child, with the share the split had",
+      "panes": [
+        "a",
+        "b",
+        "c"
+      ],
+      "stored": "{\"dir\":\"row\",\"size\":[1,2],\"kids\":[{\"dir\":\"col\",\"size\":[1,1],\"kids\":[{\"tabs\":[\"zz\"]},{\"tabs\":[\"a\",\"zz\",\"b\"],\"active\":1}]},{\"tabs\":[\"c\"]}]}",
+      "refused": false,
+      "expect": {
+        "dir": "row",
+        "size": [
+          1,
+          2
+        ],
+        "kids": [
+          {
+            "tabs": [
+              "a",
+              "b"
+            ],
+            "active": 1
+          },
+          {
+            "tabs": [
+              "c"
+            ],
+            "active": 0
+          }
+        ]
+      },
+      "written": "{\"dir\":\"row\",\"size\":[1,2],\"kids\":[{\"tabs\":[\"a\",\"b\"],\"active\":1},{\"tabs\":[\"c\"],\"active\":0}]}"
+    },
+    {
+      "name": "a row left inside a row stays a split of its own",
+      "panes": [
+        "a",
+        "b",
+        "c"
+      ],
+      "stored": "{\"dir\":\"row\",\"size\":[1,1],\"kids\":[{\"dir\":\"col\",\"size\":[1,1],\"kids\":[{\"tabs\":[\"zz\"]},{\"dir\":\"row\",\"size\":[1,1],\"kids\":[{\"tabs\":[\"a\"]},{\"tabs\":[\"b\"]}]}]},{\"tabs\":[\"c\"]}]}",
+      "refused": false,
+      "expect": {
+        "dir": "row",
+        "size": [
+          1,
+          1
+        ],
+        "kids": [
+          {
+            "dir": "row",
+            "size": [
+              1,
+              1
+            ],
+            "kids": [
+              {
+                "tabs": [
+                  "a"
+                ],
+                "active": 0
+              },
+              {
+                "tabs": [
+                  "b"
+                ],
+                "active": 0
+              }
+            ]
+          },
+          {
+            "tabs": [
+              "c"
+            ],
+            "active": 0
+          }
+        ]
+      },
+      "written": "{\"dir\":\"row\",\"size\":[1,1],\"kids\":[{\"dir\":\"row\",\"size\":[1,1],\"kids\":[{\"tabs\":[\"a\"],\"active\":0},{\"tabs\":[\"b\"],\"active\":0}]},{\"tabs\":[\"c\"],\"active\":0}]}"
+    },
+    {
       "name": "the rest of a split keep their shares as they were written",
       "panes": [
         "a",
@@ -606,6 +686,89 @@
       "written": "{\"dir\":\"row\",\"size\":[0.001,12345.678],\"kids\":[{\"tabs\":[\"a\"],\"active\":0},{\"tabs\":[\"b\"],\"active\":0}]}"
     },
     {
+      "name": "a share too large to be a finite number refuses the layout",
+      "panes": [
+        "a",
+        "b",
+        "c"
+      ],
+      "stored": "{\"dir\":\"row\",\"size\":[1e999,1],\"kids\":[{\"tabs\":[\"a\"]},{\"tabs\":[\"b\"]}]}",
+      "refused": true,
+      "expect": {
+        "tabs": [
+          "a",
+          "b",
+          "c"
+        ],
+        "active": 0
+      },
+      "written": "{\"tabs\":[\"a\",\"b\",\"c\"],\"active\":0}"
+    },
+    {
+      "name": "shares far from one are written with an exponent, as JavaScript does",
+      "panes": [
+        "a",
+        "b",
+        "c"
+      ],
+      "stored": "{\"dir\":\"row\",\"size\":[1e-7,1e+21],\"kids\":[{\"tabs\":[\"a\"]},{\"tabs\":[\"b\"]}]}",
+      "refused": false,
+      "expect": {
+        "dir": "row",
+        "size": [
+          1e-7,
+          1e+21
+        ],
+        "kids": [
+          {
+            "tabs": [
+              "a"
+            ],
+            "active": 0
+          },
+          {
+            "tabs": [
+              "b"
+            ],
+            "active": 0
+          }
+        ]
+      },
+      "written": "{\"dir\":\"row\",\"size\":[1e-7,1e+21],\"kids\":[{\"tabs\":[\"a\"],\"active\":0},{\"tabs\":[\"b\"],\"active\":0}]}"
+    },
+    {
+      "name": "and plainly up to where JavaScript stops doing so",
+      "panes": [
+        "a",
+        "b",
+        "c"
+      ],
+      "stored": "{\"dir\":\"row\",\"size\":[0.000001,100000000000000000000],\"kids\":[{\"tabs\":[\"a\"]},{\"tabs\":[\"b\"]}]}",
+      "refused": false,
+      "expect": {
+        "dir": "row",
+        "size": [
+          0.000001,
+          100000000000000000000
+        ],
+        "kids": [
+          {
+            "tabs": [
+              "a"
+            ],
+            "active": 0
+          },
+          {
+            "tabs": [
+              "b"
+            ],
+            "active": 0
+          }
+        ]
+      },
+      "written": "{\"dir\":\"row\",\"size\":[0.000001,100000000000000000000],\"kids\":[{\"tabs\":[\"a\"],\"active\":0},{\"tabs\":[\"b\"],\"active\":0}]}"
+    },
+    {
       "name": "a share with no short decimal is written in full",
       "panes": [
         "a",
@@ -770,6 +933,101 @@
       "written": "{\"tabs\":[\"c\",\"a\"],\"active\":0}"
     },
     {
+      "name": "a pane name is written back with JavaScript's escapes",
+      "panes": [
+        "t\tab",
+        "c\u0001",
+        "ls ",
+        "s/l"
+      ],
+      "stored": "{\"tabs\":[\"t\\tab\",\"c\\u0001\",\"ls \",\"s/l\"]}",
+      "refused": false,
+      "expect": {
+        "tabs": [
+          "t\tab",
+          "c\u0001",
+          "ls ",
+          "s/l"
+        ],
+        "active": 0
+      },
+      "written": "{\"tabs\":[\"t\\tab\",\"c\\u0001\",\"ls \",\"s/l\"],\"active\":0}"
+    },
+    {
+      "name": "a key written twice is the last one written",
+      "panes": [
+        "a",
+        "b",
+        "c"
+      ],
+      "stored": "{\"tabs\":[\"a\"],\"tabs\":[\"b\"]}",
+      "refused": false,
+      "expect": {
+        "tabs": [
+          "b"
+        ],
+        "active": 0
+      },
+      "written": "{\"tabs\":[\"b\"],\"active\":0}"
+    },
+    {
+      "name": "a front tab of null is not an absent one, and refuses the layout",
+      "panes": [
+        "a",
+        "b",
+        "c"
+      ],
+      "stored": "{\"tabs\":[\"a\",\"b\"],\"active\":null}",
+      "refused": true,
+      "expect": {
+        "tabs": [
+          "a",
+          "b",
+          "c"
+        ],
+        "active": 0
+      },
+      "written": "{\"tabs\":[\"a\",\"b\",\"c\"],\"active\":0}"
+    },
+    {
+      "name": "a byte order mark before it makes it no JSON",
+      "panes": [
+        "a",
+        "b",
+        "c"
+      ],
+      "stored": "﻿{\"tabs\":[\"a\"]}",
+      "refused": true,
+      "expect": {
+        "tabs": [
+          "a",
+          "b",
+          "c"
+        ],
+        "active": 0
+      },
+      "written": "{\"tabs\":[\"a\",\"b\",\"c\"],\"active\":0}"
+    },
+    {
+      "name": "an empty text is no layout",
+      "panes": [
+        "a",
+        "b",
+        "c"
+      ],
+      "stored": "",
+      "refused": true,
+      "expect": {
+        "tabs": [
+          "a",
+          "b",
+          "c"
+        ],
+        "active": 0
+      },
+      "written": "{\"tabs\":[\"a\",\"b\",\"c\"],\"active\":0}"
+    },
+    {
       "name": "escapes in a pane name are read",
       "panes": [
         "aé",
@@ -828,6 +1086,43 @@
         "active": 0
       },
       "written": "{\"tabs\":[\"a\",\"x\"],\"active\":0}"
+    },
+    {
+      "name": "a leaf of nothing but a place kept, beside others, keeps its share and its front tab as it was read",
+      "panes": [
+        "a",
+        "b",
+        "c"
+      ],
+      "later": [
+        "x",
+        "y"
+      ],
+      "stored": "{\"dir\":\"row\",\"size\":[1,3],\"kids\":[{\"tabs\":[\"x\",\"y\"],\"active\":5},{\"tabs\":[\"a\"]}]}",
+      "refused": false,
+      "expect": {
+        "dir": "row",
+        "size": [
+          1,
+          3
+        ],
+        "kids": [
+          {
+            "tabs": [
+              "x",
+              "y"
+            ],
+            "active": 1
+          },
+          {
+            "tabs": [
+              "a"
+            ],
+            "active": 0
+          }
+        ]
+      },
+      "written": "{\"dir\":\"row\",\"size\":[1,3],\"kids\":[{\"tabs\":[\"x\",\"y\"],\"active\":1},{\"tabs\":[\"a\"],\"active\":0}]}"
     },
     {
       "name": "a layout of nothing but places for panes to come is none",
@@ -966,6 +1261,24 @@
         "active": 0
       },
       "written": "{\"version\":2,\"layout\":{\"tabs\":[\"a\",\"b\",\"c\"],\"active\":0}}"
+    },
+    {
+      "name": "a version is a value: 2.0 is 2",
+      "panes": [
+        "a",
+        "b",
+        "c"
+      ],
+      "version": 2,
+      "stored": "{\"version\":2.0,\"layout\":{\"tabs\":[\"c\"]}}",
+      "refused": false,
+      "expect": {
+        "tabs": [
+          "c"
+        ],
+        "active": 0
+      },
+      "written": "{\"version\":2,\"layout\":{\"tabs\":[\"c\"],\"active\":0}}"
     },
     {
       "name": "a version can be a string",
