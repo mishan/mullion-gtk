@@ -138,7 +138,10 @@ def scenario(fn):
         except Exception as e:
             check(False, f"{name}: {e!r}")
         s.capture(os.path.join(OUT, name + ".png"), window=W, park=True)
-        log = open(d.log).read()
+        # Any popover on Xvfb (no compositor) gets this one from GDK; a
+        # plain GtkPopoverMenu in a window of its own does too.
+        log = "\n".join(l for l in open(d.log).read().splitlines()
+                        if "gdk_frame_timings_submitted() called on submitted frame" not in l)
         check("CRITICAL" not in log and "WARNING" not in log,
               f"{name}: nothing warned")
 
@@ -259,10 +262,25 @@ def divider(d):
     check(abs(sizes[0] - sizes[1]) < 1e-9, f"a double click evens it: {sizes}")
 
 
+def tab_menu(d):
+    x, y = d.centre("drawing")
+    d.s.click(int(x), int(y), window=W, button=3)
+    time.sleep(0.5)
+    d.s.capture(os.path.join(OUT, "tab_menu-open.png"))
+    d.key("r")                          # Split _Right
+    check(tabs(d.kept())[:2] == [(["editor"], 0), (["drawing"], 0)],
+          f"a tab's menu splits its pane off to the right: {tabs(d.kept())}")
+    x, y = d.centre("console")
+    d.s.click(int(x), int(y), window=W, button=3)
+    time.sleep(0.5)
+    d.key("o")                          # Clear C_onsole, the app's
+    check(d.lines("clear-console") != [], "an item of the app's own on a tab's menu runs")
+
+
 os.makedirs(OUT, exist_ok=True)
 
 for fn in (starts, raises, closes_and_reopens, drags_beside, drags_onto_a_strip,
-           drags_into, escape_cancels, chords, tab_keys, divider):
+           drags_into, escape_cancels, chords, tab_keys, divider, tab_menu):
     print(f"# {fn.__name__}")
     scenario(fn)
 

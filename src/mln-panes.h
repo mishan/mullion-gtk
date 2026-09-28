@@ -68,6 +68,17 @@ void        mln_panes_set_title     (MlnPanes *self, const char *id,
                                      const char *title);
 void        mln_panes_set_available (MlnPanes *self, const char *id,
                                      gboolean available);
+
+/* A pane that wants to be looked at, until it is: its tab is marked,
+   and the mark goes when the pane comes into view. */
+void        mln_panes_set_attention (MlnPanes *self, const char *id,
+                                     gboolean attention);
+
+/* Items of the app's own for a pane's tab menu, between the layout's
+   items and Reset Layout. Their actions are looked up from the tab up,
+   so the app's window and application actions work. NULL for none. */
+void        mln_panes_set_pane_menu (MlnPanes *self, const char *id,
+                                     GMenuModel *menu);
 void        mln_panes_set_later_func (MlnPanes *self, MlnLaterFunc func,
                                       gpointer data, GDestroyNotify destroy);
 

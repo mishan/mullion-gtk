@@ -116,6 +116,12 @@ dump (gpointer data)
 G_GNUC_END_IGNORE_DEPRECATIONS
 
 static void
+clear_console (GSimpleAction *action, GVariant *param, gpointer data)
+{
+  g_print ("clear-console\n");
+}
+
+static void
 activate (GtkApplication *app)
 {
   GtkWidget *win = gtk_application_window_new (app);
@@ -136,6 +142,23 @@ activate (GtkApplication *app)
   g_signal_connect (panes, "pane-shown", G_CALLBACK (shown), NULL);
   g_signal_connect (panes, "layout-kept", G_CALLBACK (kept), NULL);
   gtk_widget_add_tick_callback (panes, geometry, NULL, NULL);
+
+  /* An item of the app's own on the console's tab menu, and a way for a
+     harness to ask for the attention mark. */
+  {
+    GMenu *items = g_menu_new ();
+    GSimpleAction *clear = g_simple_action_new ("clear-console", NULL);
+
+    g_signal_connect (clear, "activate", G_CALLBACK (clear_console), NULL);
+    g_action_map_add_action (G_ACTION_MAP (app), G_ACTION (clear));
+    g_menu_append (items, "Clear C_onsole", "app.clear-console");
+    mln_panes_set_pane_menu (MLN_PANES (panes), "console", G_MENU_MODEL (items));
+    g_object_unref (items);
+    g_object_unref (clear);
+  }
+
+  if (g_getenv ("MLN_DEMO_ATTENTION") != NULL)
+    mln_panes_set_attention (MLN_PANES (panes), g_getenv ("MLN_DEMO_ATTENTION"), TRUE);
 
   mln_panes_set_default (MLN_PANES (panes), "main", LAYOUT);
   mln_panes_set_mode (MLN_PANES (panes), "main");
