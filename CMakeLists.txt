@@ -3,7 +3,7 @@
 # other way in and builds the same library from the same sources.
 
 cmake_minimum_required(VERSION 3.21)
-project(mullion-gtk VERSION 0.1.0 LANGUAGES C)
+project(mullion-gtk VERSION 0.2.0 LANGUAGES C)
 
 set(MLN_PACKAGE mullion-gtk-0)
 
