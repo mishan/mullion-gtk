@@ -295,6 +295,7 @@ typedef struct
   GtkWidget *shut;              /* the cross on the tab */
   GIcon *icon;
   gboolean shown;               /* what pane-shown last said */
+  gboolean pinned;              /* its corner in sight while it is in front */
   GMenuModel *menu;             /* the app's items for its tab menu */
 } Pane;
 
@@ -2832,6 +2833,12 @@ corner_shown (MlnPanes *self)
       gboolean marked = FALSE;
       gboolean menu = self->menu_id != NULL &&
                       mln_model_leaf_with (self->model, self->menu_id) == s->leaf;
+      GPtrArray *live = mln_model_live_tabs (self->model, s->leaf);
+      guint active = mln_node_active (s->leaf);
+      Pane *front = active < live->len ? pane_of (self, live->pdata[active]) : NULL;
+      gboolean pinned = front != NULL && front->pinned;
+
+      g_ptr_array_unref (live);
 
       /* A tab marked for attention is a mark nobody would see in a
          corner out of sight. */
@@ -2839,7 +2846,7 @@ corner_shown (MlnPanes *self)
            t = gtk_widget_get_next_sibling (t))
         marked = gtk_widget_has_css_class (t, "attention");
 
-      if (s->leaf == self->hover || s->leaf == focused || marked || menu)
+      if (s->leaf == self->hover || s->leaf == focused || marked || menu || pinned)
         gtk_widget_add_css_class (s->strip, "shown");
       else
         gtk_widget_remove_css_class (s->strip, "shown");
@@ -3847,6 +3854,18 @@ mln_panes_set_icon (MlnPanes *self, const char *id, GIcon *icon)
 
   gtk_image_set_from_gicon (GTK_IMAGE (p->image), icon);
   render (self);
+}
+
+void
+mln_panes_set_corner_pinned (MlnPanes *self, const char *id, gboolean pinned)
+{
+  Pane *p = pane_of (self, id);
+
+  if (p == NULL || p->pinned == !!pinned)
+    return;
+
+  p->pinned = !!pinned;
+  corner_shown (drawer_of (self, mln_model_leaf_with (self->model, id)));
 }
 
 void

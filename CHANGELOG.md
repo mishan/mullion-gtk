@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **A pinned corner**: `mln_panes_set_corner_pinned` keeps a pane's corner
+  in sight while it is in front of its leaf, for a pane whose first row
+  makes room for it.
+
 ## 0.1.0 — 2026-09-28
 
 The first release: mullion's tiled panes for a GTK 4 app, with the

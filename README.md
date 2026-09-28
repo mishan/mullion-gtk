@@ -53,7 +53,8 @@ strip, an icon sits before the title.
 Laid over the pane, the corner covers whatever its first row has at that
 end. `mln_panes_get_corner_width` says how much, and `::corner-changed`
 when that may have changed, for a pane that makes room (a margin on its
-toolbar, say). mullion's `header: 'corner'` is the same, for a web page.
+toolbar, say). A pane that has made room can keep its corner in sight
+while it is in front, where it covers nothing: `mln_panes_set_corner_pinned`. mullion's `header: 'corner'` is the same, for a web page.
 
 ## What it adds to mullion's layouts
 

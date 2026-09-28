@@ -56,6 +56,45 @@ static const char *IDS[] = { "editor", "console", "inspector", "drawing", "notes
    harness that clicks and drags, which cannot know the fonts. */
 static char *last_geometry;
 
+/* And which corners are in sight, by where they are: a harness cannot see
+   an opacity. */
+static char *last_corners;
+
+static void
+corners (MlnPanes *panes)
+{
+  GString *out = g_string_new ("corners [");
+  GtkNative *native = gtk_widget_get_native (GTK_WIDGET (panes));
+  gboolean first = TRUE;
+
+  for (GtkWidget *c = gtk_widget_get_first_child (GTK_WIDGET (panes)); c != NULL;
+       c = gtk_widget_get_next_sibling (c))
+    {
+      graphene_rect_t r;
+
+      if (g_strcmp0 (gtk_widget_get_css_name (c), "tabs") != 0 ||
+          !gtk_widget_has_css_class (c, "corner") ||
+          !gtk_widget_has_css_class (c, "shown") || native == NULL ||
+          !gtk_widget_compute_bounds (c, GTK_WIDGET (native), &r))
+        continue;
+
+      g_string_append_printf (out, "%s[%g,%g,%g,%g]", first ? "" : ",",
+                              r.origin.x, r.origin.y, r.size.width, r.size.height);
+      first = FALSE;
+    }
+
+  g_string_append (out, "]");
+
+  if (g_strcmp0 (out->str, last_corners) != 0)
+    {
+      g_print ("%s\n", out->str);
+      g_free (last_corners);
+      last_corners = g_strdup (out->str);
+    }
+
+  g_string_free (out, TRUE);
+}
+
 static gboolean
 geometry (GtkWidget *widget, GdkFrameClock *clock, gpointer data)
 {
@@ -108,6 +147,8 @@ geometry (GtkWidget *widget, GdkFrameClock *clock, gpointer data)
     }
 
   g_string_append (out, "}");
+
+  corners (panes);
 
   if (g_strcmp0 (out->str, last_geometry) != 0)
     {
@@ -212,6 +253,16 @@ toggle_header (GSimpleAction *action, GVariant *param, gpointer panes)
            mln_panes_get_header (panes) == MLN_HEADER_CORNER ? "corner" : "strip");
 }
 
+/* The inspector's corner kept in sight, and let go: Ctrl P. */
+static void
+toggle_pin (GSimpleAction *action, GVariant *param, gpointer panes)
+{
+  static gboolean pinned;
+
+  pinned = !pinned;
+  mln_panes_set_corner_pinned (panes, "inspector", pinned);
+}
+
 static void
 corner_changed (MlnPanes *panes, gpointer data)
 {
@@ -305,6 +356,16 @@ activate (GtkApplication *app)
 
   if (g_getenv ("MLN_DEMO_HEADERBAR") != NULL)
     mln_panes_set_window_func (MLN_PANES (panes), make_window, app, NULL);
+
+  {
+    GSimpleAction *pin = g_simple_action_new ("pin", NULL);
+
+    g_signal_connect (pin, "activate", G_CALLBACK (toggle_pin), panes);
+    g_action_map_add_action (G_ACTION_MAP (app), G_ACTION (pin));
+    gtk_application_set_accels_for_action (app, "app.pin",
+                                           (const char *[]) { "<Control>p", NULL });
+    g_object_unref (pin);
+  }
 
   {
     GSimpleAction *t = g_simple_action_new ("header", NULL);
