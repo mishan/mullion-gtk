@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  meson:
+    # Ubuntu 24.04's GTK is 4.14, the oldest this is built against in CI;
+    # the floor is 4.10.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # shotbox, for the widget suite: a private X display and XTEST.
+      - uses: actions/checkout@v4
+        with:
+          repository: mishan/shotbox
+          path: shotbox
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build gcc pkg-config libgtk-4-dev python3 \
+            xvfb xauth dbus-daemon imagemagick x11-utils fonts-dejavu-core
+
+      - name: Build
+        run: |
+          meson setup build -Db_sanitize=address,undefined \
+            -Dshotbox="$GITHUB_WORKSPACE/shotbox"
+          ninja -C build
+
+      - name: Test
+        run: meson test -C build --print-errorlogs
+
+      - name: Keep the widget suite's pictures and logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: widget-logs
+          path: build/widget-logs
+          if-no-files-found: ignore
+
+  cmake:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build gcc pkg-config libgtk-4-dev
+
+      # The unit suites; the widget suite skips itself without shotbox.
+      - name: Build and test
+        run: |
+          cmake -S . -B build -G Ninja
+          cmake --build build
+          ctest --test-dir build --output-on-failure
+
+      - name: Install, and build against what was installed
+        run: |
+          cmake --install build --prefix "$RUNNER_TEMP/prefix"
+          export PKG_CONFIG_PATH="$(dirname "$(find "$RUNNER_TEMP/prefix" -name mullion-gtk-0.pc)")"
+          cc demo/demo.c $(pkg-config --cflags --libs mullion-gtk-0) -o demo-outside

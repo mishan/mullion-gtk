@@ -244,7 +244,11 @@ add_style (GdkDisplay *display)
 
   css = gtk_css_provider_new ();
   g_signal_connect (css, "parsing-error", G_CALLBACK (style_error), NULL);
+#if GTK_CHECK_VERSION (4, 12, 0)
   gtk_css_provider_load_from_string (css, STYLE);
+#else
+  gtk_css_provider_load_from_data (css, STYLE, -1);
+#endif
   gtk_style_context_add_provider_for_display (display, GTK_STYLE_PROVIDER (css),
                                               STYLE_PRIORITY);
   g_object_set_data_full (G_OBJECT (display), "mln-panes-style", css, g_object_unref);

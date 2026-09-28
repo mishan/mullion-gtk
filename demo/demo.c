@@ -7,7 +7,7 @@
 /* A window of panes to try mullion-gtk on: an editor, a console, an
    inspector and a drawing, laid out as mullion's README lays them out. */
 
-#include "mln-panes.h"
+#include "mullion-gtk.h"
 
 #include <stdio.h>
 
