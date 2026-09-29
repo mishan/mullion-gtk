@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 — 2026-09-28
+
+- **Fixed**: closing the last pane of a floating window by its tab's cross,
+  Alt W or its tab menu crashed: the window closed with it, and the click
+  went on with the MlnPanes that had drawn it.
+
 ## 0.2.0 — 2026-09-28
 
 - **A pinned corner**: `mln_panes_set_corner_pinned` keeps a pane's corner
