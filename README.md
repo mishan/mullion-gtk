@@ -116,10 +116,125 @@ give it with `-Dshotbox=/path/to/shotbox` or `-DMLN_SHOTBOX=/path/to/shotbox`.
 
 ## Using it
 
-From another meson project, as a subproject or installed:
-`dependency('mullion-gtk-0')`. From CMake, `add_subdirectory` or
-FetchContent, then `target_link_libraries(app PRIVATE mullion-gtk::mullion-gtk)`;
-or installed, through its pkg-config file. Include `mullion-gtk.h`.
+It needs GTK 4.10 and GLib 2.74. Built into an app, it is a static
+library and installs nothing.
+
+From a meson project, as a subproject (`subprojects/mullion-gtk.wrap`):
+
+```ini
+[wrap-git]
+url = https://github.com/mishan/mullion-gtk.git
+revision = v0.2.1
+depth = 1
+```
+
+```meson
+mullion = dependency('mullion-gtk-0', fallback: ['mullion-gtk'])
+executable('app', 'app.c', dependencies: mullion)
+```
+
+From CMake, with FetchContent (or `add_subdirectory` on a copy):
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(mullion-gtk
+  GIT_REPOSITORY https://github.com/mishan/mullion-gtk.git
+  GIT_TAG v0.2.1)
+FetchContent_MakeAvailable(mullion-gtk)
+target_link_libraries(app PRIVATE mullion-gtk::mullion-gtk)
+```
+
+Installed, it is `pkg-config mullion-gtk-0`, and `dependency('mullion-gtk-0')`
+finds it without the fallback. Either way, include `mullion-gtk.h`.
+
+### A window of panes
+
+The app registers its panes by id, gives a default layout, and loads what
+it kept last time:
+
+```c
+#include <mullion-gtk.h>
+
+static const char *LAYOUT =
+  "{\"dir\":\"row\",\"size\":[0.7,0.3],\"kids\":["
+  "{\"tabs\":[\"editor\",\"preview\"]},"
+  "{\"tabs\":[\"outline\"]}]}";
+
+static void
+activate (GtkApplication *app)
+{
+  GtkWidget *win = gtk_application_window_new (app);
+  GtkWidget *panes = mln_panes_new ();
+
+  /* An id, a title, the content, and the narrowest it may be. */
+  mln_panes_register (MLN_PANES (panes), "editor", "Editor", gtk_text_view_new (), 240);
+  mln_panes_register (MLN_PANES (panes), "preview", "Preview", gtk_picture_new (), 160);
+  mln_panes_register (MLN_PANES (panes), "outline", "Outline", gtk_list_box_new (), 120);
+
+  mln_panes_set_default (MLN_PANES (panes), "main", LAYOUT);
+  mln_panes_set_mode (MLN_PANES (panes), "main");
+  mln_panes_load (MLN_PANES (panes), NULL);  /* NULL: the default */
+
+  gtk_window_set_child (GTK_WINDOW (win), panes);
+  gtk_window_present (GTK_WINDOW (win));
+}
+```
+
+A layout is a tree: a split has a `dir` (`row` or `col`), the `size` of
+each kid as a fraction, and its `kids`; a leaf has its `tabs`, the first
+in front. A pane the layout does not name is in the drawer.
+
+### Keeping the layout
+
+`::layout-kept` hands over the text to keep whenever the layout changes,
+and NULL when it is reset; `mln_panes_load` takes it back. With
+GSettings, say:
+
+```c
+static void
+kept (MlnPanes *panes, const char *mode, const char *text, gpointer settings)
+{
+  g_settings_set_string (settings, "layout", text != NULL ? text : "");
+}
+
+  /* ... after registering the panes: */
+  char *text = g_settings_get_string (settings, "layout");
+
+  mln_panes_set_version (MLN_PANES (panes), "2");
+  mln_panes_load (MLN_PANES (panes), *text != '\0' ? text : NULL);
+  g_signal_connect (panes, "layout-kept", G_CALLBACK (kept), settings);
+  g_free (text);
+```
+
+A kept layout that does not parse, or was kept under another version, is
+passed over for the default: change the version when the default changes
+enough that an old layout should not come back.
+
+### Panes that come and go
+
+```c
+static void
+discard (MlnPanes *panes, const char *id, gpointer data)
+{
+  g_object_unref (mln_panes_remove (panes, id));
+}
+
+/* Opened after the layout is up, beside the editor. An ephemeral pane is
+   ended on ::pane-discard rather than closed to the drawer. */
+mln_panes_add (panes, "search", "Search", search_widget, 160,
+               MLN_PANE_EPHEMERAL, "editor");
+g_signal_connect (panes, "pane-discard", G_CALLBACK (discard), NULL);
+
+/* Brought to the front, out of the drawer if it was there, and focused. */
+mln_panes_present (panes, "outline", TRUE);
+
+/* A pane new in this release, put in the leaf whose "slots" name "side"
+   wherever a kept layout does not have it. Before mln_panes_load. */
+mln_panes_set_placement (panes, "terminal", "side", TRUE);
+```
+
+[`demo/demo.c`](demo/demo.c) uses the rest: icons, the corner, a pane's
+own tab-menu items, floating windows made by the app.
 
 ## License
 
