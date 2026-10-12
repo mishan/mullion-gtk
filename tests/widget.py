@@ -366,6 +366,27 @@ def split_chords(d):
           f"Alt - in a leaf of one pane does nothing when the drawer is empty: {tabs(d.kept())}")
 
 
+def f6_cycles(d):
+    d.click(*d.centre("inspector", "leaf"))      # into the inspector's text
+    seen = []
+    for _ in range(4):
+        d.key("F6")
+        seen.append(d.focus())
+    check(all(f.startswith("tab ") for f in seen) and len(set(seen[:3])) == 3,
+          f"F6 steps the focus round the leaves, from a text field too: {seen}")
+    check(seen[3] == seen[0], f"and round from the last to the first: {seen}")
+    d.key("shift+F6")
+    check(d.focus() == seen[2], f"Shift F6 steps back: {d.focus()}")
+    d.click(*d.centre("drawing"))
+    d.key("alt+\\")                     # Drawing off to the right of the editor
+    check(d.focus() == "tab Editor", f"(the focus stays with the editor: {d.focus()})")
+    d.key("F6")
+    check(d.focus() == "tab Drawing",
+          f"in the order the leaves are laid out, a new one where it sits: {d.focus()}")
+    d.key("F6")
+    check(d.focus() == "tab Console", f"and on past it: {d.focus()}")
+
+
 def tab_order(d):
     d.click(*d.centre("inspector", "leaf"))      # into the inspector's text
     seen = []
@@ -639,7 +660,7 @@ os.makedirs(OUT, exist_ok=True)
 
 for fn in (starts, raises, closes_and_reopens, drags_beside, drags_onto_a_strip,
            drags_into, escape_cancels, chords, tab_keys, divider, tab_menu,
-           drops_on_the_drawer, split_chords, tab_order):
+           drops_on_the_drawer, split_chords, f6_cycles, tab_order):
     print(f"# {fn.__name__}")
     scenario(fn)
 
