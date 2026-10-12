@@ -3,7 +3,7 @@
 # other way in and builds the same library from the same sources.
 
 cmake_minimum_required(VERSION 3.21)
-project(mullion-gtk VERSION 0.3.0 LANGUAGES C)
+project(mullion-gtk VERSION 0.3.1 LANGUAGES C)
 
 set(MLN_PACKAGE mullion-gtk-0)
 
@@ -62,8 +62,11 @@ endif()
 include(GNUInstallDirs)
 
 # The widget's strings, in a domain of their own (po/, which meson builds).
-find_package(Intl REQUIRED)
-target_link_libraries(mullion-gtk PRIVATE Intl::Intl)
+# As in meson.build: GLib brings libintl where libc does not have it.
+find_package(Intl)
+if(Intl_FOUND)
+  target_link_libraries(mullion-gtk PRIVATE Intl::Intl)
+endif()
 target_compile_definitions(mullion-gtk PRIVATE
   GETTEXT_PACKAGE="${MLN_PACKAGE}"
   LOCALEDIR="${CMAKE_INSTALL_FULL_LOCALEDIR}")

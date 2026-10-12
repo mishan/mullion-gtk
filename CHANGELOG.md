@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 — 2026-10-12
+
+- **Fixed**: building on macOS, where libintl is not in libc: 0.3.0
+  required meson or CMake to find libintl on their own, and neither does
+  there (Homebrew's gettext is not on the compiler's default paths). It is
+  optional now; where libc lacks it, GLib's flags bring it, as GLib needs
+  it too.
+
 ## 0.3.0 — 2026-10-12
 
 - **F6 and Shift F6** step the focus to the next leaf and the one before,
