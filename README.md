@@ -61,8 +61,13 @@ page.
 ## Accessibility
 
 Tabs, strips, dividers and the drawer have the roles and names a screen
-reader looks for, and what is out of sight is hidden from it. Dividers
-take the arrow keys, Home, End and Enter (evens the split). Under high
+reader looks for, and what is out of sight is hidden from it. From GTK
+4.14, a move the focus does not tell of -- a pane moved, split off,
+zoomed, closed, reopened, or moved between windows -- is announced, as is
+an attention mark on a pane out of sight. Ctrl Shift Page Up and Page
+Down move the pane in front along its strip (a tab's menu has the same,
+as Move Left and Move Right). Dividers take the arrow keys, Home, End and
+Enter (evens the split). Under high
 contrast -- GTK's interface contrast from GTK 4.20, or a high contrast
 theme before that -- MlnPanes has the `contrast` style class and dims
 nothing; an app's stylesheet can use it too.

@@ -564,6 +564,31 @@ front_id (MlnPanes *self, MlnNode *leaf)
   return id;
 }
 
+/* What a screen reader is told of a pane: `format' with its title, or
+   NULL for a pane there is not. Made before a move that can take the pane
+   with it. */
+static char *
+said (MlnPanes *self, const char *format, const char *id)
+{
+  Pane *p = pane_of (self, id);
+
+  return p != NULL ? g_strdup_printf (format, p->title) : NULL;
+}
+
+/* A change to the layout that the focus does not tell of -- the pane
+   with the focus has moved, or one has gone -- told, and `text' freed. */
+static void
+announce (MlnPanes *self, char *text)
+{
+#if GTK_CHECK_VERSION (4, 14, 0) && GDK_VERSION_MAX_ALLOWED >= GDK_VERSION_4_14
+  if (text != NULL)
+    gtk_accessible_announce (GTK_ACCESSIBLE (self), text,
+                             GTK_ACCESSIBLE_ANNOUNCEMENT_PRIORITY_MEDIUM);
+#endif
+
+  g_free (text);
+}
+
 /* A leaf to go to when the one that was is not: the first of this one's
    tree, or of the main tree when this was a floating window that has
    gone. */
@@ -693,12 +718,15 @@ on_tab_shut (GtkButton *button, gpointer data)
   MlnPanes *at;
 
   char *id = g_strdup (p->id);
+  char *text;
 
   if (!mln_model_close (self->model, id))
     {
       g_free (id);
       return;
     }
+
+  text = said (self, "%s closed", id);
 
   if (leaf != NULL && mln_model_holds (self->model, leaf))
     mln_model_set_focus (self->model, leaf);
@@ -721,6 +749,8 @@ on_tab_shut (GtkButton *button, gpointer data)
       focus_front (at, at == self && leaf != NULL && mln_model_holds (at->model, leaf)
                        ? leaf : somewhere (at));
   }
+
+  announce (at, text);
 
   g_object_unref (self);
   g_free (id);
@@ -1213,6 +1243,8 @@ on_reopen (GtkButton *button, gpointer data)
 
       if (p != NULL)
         gtk_widget_grab_focus (p->tab);
+
+      announce (self, said (self, "%s reopened", id));
     }
 
   g_free (id);
@@ -1756,6 +1788,8 @@ on_float_close (GtkWindow *win, gpointer data)
           /* The focus went with the window: onto what came back. */
           if (id != NULL)
             focus_front (self, mln_model_leaf_with (self->model, id));
+
+          announce (self, said (self, "%s moved to the main window", id));
 
           g_free (id);
           break;
@@ -2362,6 +2396,9 @@ land (gpointer data)
   if (self->model != NULL && !main_of (self)->disposed &&
       mln_model_has (self->model, l->id) && (leaf == NULL || mln_model_holds (self->model, leaf)))
     {
+      MlnPanes *home = main_of (self);
+      char *text = said (self, l->drop.kind == DROP_DRAWER ? "%s closed" : "%s moved", l->id);
+
       switch (l->drop.kind)
         {
         case DROP_DRAWER:
@@ -2409,6 +2446,9 @@ land (gpointer data)
 
           gtk_widget_grab_focus (tab);
         }
+
+      announce (pane_of (home, l->id) != NULL
+                ? panes_here (pane_of (home, l->id)->tab, home) : home, text);
     }
 
   drop_clear (&l->drop);
@@ -2690,8 +2730,9 @@ chord_is (GtkEventControllerKey *keys, guint keyval, guint code, guint want)
   return found;
 }
 
+/* After a move: the focus onto `leaf', and then `text' told (freed). */
 static void
-done (MlnPanes *self, MlnNode *leaf)
+done (MlnPanes *self, MlnNode *leaf, char *text)
 {
   MlnPanes *home = main_of (self);
   MlnPanes *at;
@@ -2704,7 +2745,49 @@ done (MlnPanes *self, MlnNode *leaf)
 
   at = still_here (self, home);
   focus_front (at, at == self ? leaf : somewhere (home));
+  announce (at, text);
   g_object_unref (self);
+}
+
+/* A pane one place along its strip, toward its start (`back') or its
+   end. FALSE when it is at that end already. */
+static gboolean
+reorder (MlnPanes *self, const char *id, gboolean back)
+{
+  MlnNode *leaf = mln_model_leaf_with (self->model, id);
+  GPtrArray *live;
+  char *mine, *before = NULL;
+  int at = -1, n;
+
+  if (leaf == NULL)
+    return FALSE;
+
+  live = mln_model_live_tabs (self->model, leaf);
+  n = (int) live->len;
+
+  for (int i = 0; i < n; i++)
+    if (strcmp (live->pdata[i], id) == 0)
+      at = i;
+
+  if (at < 0 || (back ? at == 0 : at == n - 1))
+    {
+      g_ptr_array_unref (live);
+      return FALSE;
+    }
+
+  /* Before the one before it, or before the one after the next. */
+  if (back || at + 2 < n)
+    before = g_strdup (live->pdata[back ? at - 1 : at + 2]);
+
+  mine = g_strdup (id);
+  g_ptr_array_unref (live);
+  mln_model_drop_tab (self->model, mine, leaf, before);
+  done (self, mln_model_leaf_with (self->model, mine),
+        said (self, back != rtl (self) ? "%s moved left" : "%s moved right", mine));
+  g_free (before);
+  g_free (mine);
+
+  return TRUE;
 }
 
 /* The leaves this one draws, in the tree's order: the order they are laid
@@ -2745,7 +2828,7 @@ cycle (MlnPanes *self, gboolean back)
       at = i;
 
   if (n >= 2)
-    done (self, order->pdata[(at + (back ? n - 1 : 1)) % n]);
+    done (self, order->pdata[(at + (back ? n - 1 : 1)) % n], NULL);
 
   g_ptr_array_unref (order);
   return n >= 2;
@@ -2759,7 +2842,9 @@ cycle (MlnPanes *self, gboolean back)
  * W closes; Alt 0 goes back to the default. Never while the focus is
  * somewhere text is typed. F6 and Shift F6 step the focus round the
  * leaves, as F6 moves between panes in most desktop apps, and from a text
- * field too, which has no use for F6.
+ * field too, which has no use for F6. Ctrl Shift Page Up and Page Down
+ * move the pane in front along its strip, as they move a tab in a
+ * browser; a text view that wants them has them first.
  */
 static gboolean
 on_key (GtkEventControllerKey *keys, guint keyval, guint code,
@@ -2784,6 +2869,18 @@ on_key (GtkEventControllerKey *keys, guint keyval, guint code,
       !(state & (GDK_ALT_MASK | GDK_CONTROL_MASK | GDK_SUPER_MASK | GDK_META_MASK)) &&
       mln_model_loaded (self->model))
     return cycle (self, shift);
+
+  if ((keyval == GDK_KEY_Page_Up || keyval == GDK_KEY_Page_Down) &&
+      (state & (GDK_ALT_MASK | GDK_CONTROL_MASK | GDK_SHIFT_MASK | GDK_SUPER_MASK |
+                GDK_META_MASK)) == (GDK_CONTROL_MASK | GDK_SHIFT_MASK) &&
+      mln_model_loaded (self->model))
+    {
+      char *front = front_id (self, current (self));
+      gboolean moved = front != NULL && reorder (self, front, keyval == GDK_KEY_Page_Up);
+
+      g_free (front);
+      return moved;
+    }
 
   if (!(state & GDK_ALT_MASK) ||
       (state & (GDK_CONTROL_MASK | GDK_SUPER_MASK | GDK_META_MASK)) ||
@@ -2811,7 +2908,7 @@ on_key (GtkEventControllerKey *keys, guint keyval, guint code,
   if ((dx || dy) && !shift)
     {
       if ((to = toward (self, leaf, dx, dy)) != NULL)
-        done (self, to);
+        done (self, to, NULL);
     }
   else if (dx || dy)
     {
@@ -2828,6 +2925,8 @@ on_key (GtkEventControllerKey *keys, guint keyval, guint code,
       else
         {
           char *mine = g_strdup (id);
+          char *text = said (self, dx < 0 ? "%s moved left" : dx > 0 ? "%s moved right"
+                                   : dy < 0 ? "%s moved up" : "%s moved down", id);
           MlnNode *zoom;
 
           if (to != NULL)
@@ -2842,7 +2941,7 @@ on_key (GtkEventControllerKey *keys, guint keyval, guint code,
           if (zoom != NULL && zoom != to && mln_model_float_of (self->model, to) == 0)
             mln_model_set_zoom (self->model, NULL);
 
-          done (self, to);
+          done (self, to, text);
           g_free (mine);
         }
     }
@@ -2863,8 +2962,11 @@ on_key (GtkEventControllerKey *keys, guint keyval, guint code,
         used = FALSE;
       else
         {
+          char *text = said (self, dir == MLN_ROW ? "%s split off to the right"
+                                                  : "%s split off below", moving);
+
           mln_model_drop_beside (self->model, moving, leaf, dir, TRUE);
-          done (self, leaf);
+          done (self, leaf, text);
         }
 
       g_free (moving);
@@ -2872,16 +2974,23 @@ on_key (GtkEventControllerKey *keys, guint keyval, guint code,
     }
   else if ((keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) && self->owner == NULL)
     {
-      mln_model_set_zoom (self->model, mln_model_get_zoom (self->model) == NULL ? leaf : NULL);
+      gboolean zooming = mln_model_get_zoom (self->model) == NULL;
+
+      mln_model_set_zoom (self->model, zooming ? leaf : NULL);
       render (self);
       focus_front (self, leaf);
+      announce (self, said (self, zooming ? "%s zoomed" : "%s unzoomed", id));
     }
   else if (chord_is (keys, keyval, code, GDK_KEY_w) && id != NULL)
     {
+      char *text = said (self, "%s closed", id);
+
       /* Onto a leaf still in the tree: this one if it kept anything. */
       if (mln_model_close (self->model, id))
         done (self, mln_model_holds (self->model, leaf) ? leaf
-                                                       : somewhere (self));
+                                                       : somewhere (self), text);
+      else
+        g_free (text);
     }
   else if (chord_is (keys, keyval, code, GDK_KEY_0))
     {
@@ -2928,6 +3037,7 @@ undock (MlnPanes *self, const char *id)
     {
       gtk_window_present (fw->win);
       gtk_widget_grab_focus (p->tab);
+      announce (fw->panes, said (self, "%s moved to a new window", id));
     }
 }
 
@@ -2950,6 +3060,7 @@ dock (MlnPanes *self, const char *id)
     gtk_window_present (GTK_WINDOW (root));
 
   gtk_widget_grab_focus (p->tab);
+  announce (home, said (home, "%s moved to the main window", id));
 }
 
 static void
@@ -2962,24 +3073,34 @@ act_on_pane (GtkWidget *w, const char *name, GVariant *param)
 
   if (strcmp (name, "panes.close") == 0)
     {
+      char *text = said (self, "%s closed", mine);
+
       if (mln_model_close (self->model, mine))
         done (self, leaf != NULL && mln_model_holds (self->model, leaf)
-                    ? leaf : somewhere (self));
+                    ? leaf : somewhere (self), text);
+      else
+        g_free (text);
     }
   else if (leaf != NULL && (strcmp (name, "panes.split-right") == 0 ||
                             strcmp (name, "panes.split-down") == 0))
     {
-      mln_model_drop_beside (self->model, mine, leaf,
-                             strcmp (name, "panes.split-right") == 0 ? MLN_ROW : MLN_COL,
-                             TRUE);
-      done (self, mln_model_leaf_with (self->model, mine));
+      gboolean right = strcmp (name, "panes.split-right") == 0;
+      char *text = said (self, right ? "%s split off to the right" : "%s split off below", mine);
+
+      mln_model_drop_beside (self->model, mine, leaf, right ? MLN_ROW : MLN_COL, TRUE);
+      done (self, mln_model_leaf_with (self->model, mine), text);
     }
   else if (leaf != NULL && strcmp (name, "panes.zoom") == 0 && self->owner == NULL)
     {
-      mln_model_set_zoom (self->model, mln_model_get_zoom (self->model) == leaf ? NULL : leaf);
+      gboolean zooming = mln_model_get_zoom (self->model) != leaf;
+
+      mln_model_set_zoom (self->model, zooming ? leaf : NULL);
       render (self);
       focus_front (self, leaf);
+      announce (self, said (self, zooming ? "%s zoomed" : "%s unzoomed", mine));
     }
+  else if (strcmp (name, "panes.move-left") == 0 || strcmp (name, "panes.move-right") == 0)
+    reorder (self, mine, (strcmp (name, "panes.move-left") == 0) != rtl (self));
   else if (strcmp (name, "panes.undock") == 0)
     undock (self, mine);
   else if (strcmp (name, "panes.dock") == 0)
@@ -3029,6 +3150,34 @@ open_menu (MlnPanes *self, const char *id, double x, double y)
     g_menu_append (layout, label, detailed);                            \
     g_free (detailed);                                                  \
   } G_STMT_END
+
+  /* Along its strip, either way there is a tab to pass: the chords shown
+     are on_key's. */
+  {
+    guint at = 0;
+
+    while (at < live->len && strcmp (live->pdata[at], id) != 0)
+      at++;
+
+    for (int left = 1; left >= 0; left--)
+      {
+        gboolean back = left != rtl (self);
+
+        if (back ? at > 0 : at + 1 < live->len)
+          {
+            char *detailed = g_strconcat (left ? "panes.move-left" : "panes.move-right",
+                                          target, NULL);
+            GMenuItem *item = g_menu_item_new (left ? "Move Lef_t" : "Move Ri_ght", detailed);
+
+            g_menu_item_set_attribute (item, "accel", "s",
+                                       back ? "<Control><Shift>Page_Up"
+                                            : "<Control><Shift>Page_Down");
+            g_menu_append_item (layout, item);
+            g_object_unref (item);
+            g_free (detailed);
+          }
+      }
+  }
 
   /* A pane alone in its leaf has nothing to split off, and a split that
      would leave either half under its minimum is refused. */
@@ -3891,6 +4040,8 @@ mln_panes_class_init (MlnPanesClass *klass)
   gtk_widget_class_install_action (wc, "panes.zoom", "s", act_on_pane);
   gtk_widget_class_install_action (wc, "panes.undock", "s", act_on_pane);
   gtk_widget_class_install_action (wc, "panes.dock", "s", act_on_pane);
+  gtk_widget_class_install_action (wc, "panes.move-left", "s", act_on_pane);
+  gtk_widget_class_install_action (wc, "panes.move-right", "s", act_on_pane);
   gtk_widget_class_install_action (wc, "panes.reset", NULL, act_reset);
 }
 
@@ -4230,6 +4381,10 @@ mln_panes_set_attention (MlnPanes *self, const char *id, gboolean attention)
     return;
 
   /* A pane in view is being looked at already. */
+  if (attention && !p->shown && !gtk_widget_has_css_class (p->tab, "attention"))
+    announce (drawer_of (self, mln_model_leaf_with (self->model, id)),
+              said (self, "%s needs attention", id));
+
   mark (p, attention && !p->shown);
 
   corner_shown (drawer_of (self, mln_model_leaf_with (self->model, id)));
