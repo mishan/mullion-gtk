@@ -61,6 +61,13 @@ endif()
 
 include(GNUInstallDirs)
 
+# The widget's strings, in a domain of their own (po/, which meson builds).
+find_package(Intl REQUIRED)
+target_link_libraries(mullion-gtk PRIVATE Intl::Intl)
+target_compile_definitions(mullion-gtk PRIVATE
+  GETTEXT_PACKAGE="${MLN_PACKAGE}"
+  LOCALEDIR="${CMAKE_INSTALL_FULL_LOCALEDIR}")
+
 if(MLN_INSTALL)
   install(TARGETS mullion-gtk
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}

@@ -10,11 +10,17 @@ package = 'mullion-gtk-' + api
 glib = dependency('glib-2.0', version: '>= 2.74')
 gtk = dependency('gtk4', version: '>= 4.10')
 libm = meson.get_compiler('c').find_library('m', required: false)
+intl = dependency('intl')
+i18n = import('i18n')
 
 add_project_arguments('-Wno-unused-parameter', '-Wno-missing-field-initializers',
                       language: 'c')
 
 subdir('src')
+
+# Translations install with the library even as a subproject: its strings
+# are looked up under the app's localedir, which is where they then go.
+subdir('po')
 
 # Built into another project with meson, it is a subproject and nothing more.
 if not meson.is_subproject()

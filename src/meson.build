@@ -18,20 +18,25 @@ if host_machine.system() == 'windows' and get_option('default_library') != 'stat
   exporting = ['-DMLN_BUILDING_SHARED']
 endif
 
+# The widget's strings, in a domain of their own.
+i18n_args = ['-DGETTEXT_PACKAGE="' + package + '"',
+             '-DLOCALEDIR="' + (get_option('prefix') / get_option('localedir')) + '"']
+
 if meson.is_subproject()
   # Built into an app: static whatever the app's default_library says, so
   # its bundle has no shared object to find, and nothing installed.
   libpanes = static_library(package, files('mln-panes.c'),
-    dependencies: [gtk, model_dep],
+    dependencies: [gtk, model_dep, intl],
     link_whole: libmodel,
+    c_args: i18n_args,
     include_directories: incs)
 else
   # Static by default here too (default_library in meson.build).
   libpanes = library(package, files('mln-panes.c'),
-    dependencies: [gtk, model_dep],
+    dependencies: [gtk, model_dep, intl],
     link_whole: libmodel,
     include_directories: incs,
-    c_args: exporting,
+    c_args: exporting + i18n_args,
     gnu_symbol_visibility: 'hidden',
     version: meson.project_version(),
     soversion: api,

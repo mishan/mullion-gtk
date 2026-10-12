@@ -92,7 +92,8 @@ jobs:
           ln -s "$GITHUB_WORKSPACE" tests/consumer/subprojects/mullion-gtk
           meson setup consumer tests/consumer --prefix "$RUNNER_TEMP/consumer"
           ninja -C consumer install
-          ! find "$RUNNER_TEMP/consumer" -name '*mullion*' | grep .
+          # Nothing of the library's installs but its translations.
+          ! find "$RUNNER_TEMP/consumer" -name '*mullion*' -not -name 'mullion-gtk-0.mo' | grep .
           ! find consumer -name 'libmullion-gtk-0.so*' | grep .
 
   cmake:

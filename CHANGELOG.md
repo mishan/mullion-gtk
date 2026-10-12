@@ -24,6 +24,10 @@
 - **Ctrl Shift Page Up and Page Down** move the pane in front along its
   strip, as they move a tab in a browser, and a tab's menu has Move Left
   and Move Right, with the chords shown.
+- **Translatable**: every string the widget shows or says is in the
+  gettext domain `mullion-gtk-0`, looked up under the localedir the
+  library is built for; `po/` has the template's sources (no
+  translations yet). Builds need libintl, which GLib does already.
 - **Closing a floating window** puts the focus on what came back into
   the main window, rather than nowhere.
 

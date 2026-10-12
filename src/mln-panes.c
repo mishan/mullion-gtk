@@ -25,6 +25,7 @@
 #include "mln-panes.h"
 #include "mln-model.h"
 
+#include <glib/gi18n-lib.h>
 #include <math.h>
 #include <string.h>
 
@@ -726,7 +727,7 @@ on_tab_shut (GtkButton *button, gpointer data)
       return;
     }
 
-  text = said (self, "%s closed", id);
+  text = said (self, _("%s closed"), id);
 
   if (leaf != NULL && mln_model_holds (self->model, leaf))
     mln_model_set_focus (self->model, leaf);
@@ -796,7 +797,7 @@ make_tab (MlnPanes *self, Pane *p)
   gtk_widget_set_parent (p->shut, tab);
 
   {
-    char *name = g_strdup_printf ("Close %s", p->title);
+    char *name = g_strdup_printf (_("Close %s"), p->title);
 
     gtk_accessible_update_property (GTK_ACCESSIBLE (p->shut),
                                     GTK_ACCESSIBLE_PROPERTY_LABEL, name, -1);
@@ -859,7 +860,7 @@ mark (Pane *p, gboolean on)
       gtk_widget_add_css_class (p->tab, "attention");
       gtk_accessible_update_property (GTK_ACCESSIBLE (p->tab),
                                       GTK_ACCESSIBLE_PROPERTY_DESCRIPTION,
-                                      "Needs attention", -1);
+                                      _("Needs attention"), -1);
     }
   else
     {
@@ -930,7 +931,7 @@ make_strip (MlnPanes *self, MlnNode *leaf)
                            "css-name", "tabs",
                            NULL);
   gtk_accessible_update_property (GTK_ACCESSIBLE (s->strip),
-                                  GTK_ACCESSIBLE_PROPERTY_LABEL, "Panes", -1);
+                                  GTK_ACCESSIBLE_PROPERTY_LABEL, _("Panes"), -1);
   gtk_widget_set_parent (s->strip, GTK_WIDGET (self));
 
   /* The corner's way to the tab menu, which in a strip is a right click
@@ -940,9 +941,9 @@ make_strip (MlnPanes *self, MlnNode *leaf)
   gtk_widget_add_css_class (s->more, "flat");
   gtk_widget_add_css_class (s->more, "panemenu");
   gtk_widget_set_focus_on_click (s->more, FALSE);
-  gtk_widget_set_tooltip_text (s->more, "Pane menu");
+  gtk_widget_set_tooltip_text (s->more, _("Pane menu"));
   gtk_accessible_update_property (GTK_ACCESSIBLE (s->more),
-                                  GTK_ACCESSIBLE_PROPERTY_LABEL, "Pane menu", -1);
+                                  GTK_ACCESSIBLE_PROPERTY_LABEL, _("Pane menu"), -1);
   g_object_set_data (G_OBJECT (s->more), "mln-strip", s);
   g_signal_connect (s->more, "clicked", G_CALLBACK (on_more), self);
   gtk_widget_set_visible (s->more, FALSE);
@@ -1182,7 +1183,7 @@ make_divider (MlnPanes *self, MlnNode *split, guint a, guint b)
   gtk_widget_add_css_class (d->bar, row ? "vertical" : "horizontal");
   gtk_accessible_update_property (GTK_ACCESSIBLE (d->bar),
                                   GTK_ACCESSIBLE_PROPERTY_LABEL,
-                                  row ? "Resize columns" : "Resize rows",
+                                  row ? _("Resize columns") : _("Resize rows"),
                                   GTK_ACCESSIBLE_PROPERTY_ORIENTATION,
                                   row ? GTK_ORIENTATION_VERTICAL : GTK_ORIENTATION_HORIZONTAL,
                                   GTK_ACCESSIBLE_PROPERTY_VALUE_MIN, 0.0,
@@ -1244,7 +1245,7 @@ on_reopen (GtkButton *button, gpointer data)
       if (p != NULL)
         gtk_widget_grab_focus (p->tab);
 
-      announce (self, said (self, "%s reopened", id));
+      announce (self, said (self, _("%s reopened"), id));
     }
 
   g_free (id);
@@ -1291,9 +1292,9 @@ fill_drawer (MlnPanes *self)
     gtk_box_remove (GTK_BOX (self->drawer), child);
 
   {
-    const char *what = closed->len > 0 ? "Closed:"
+    const char *what = closed->len > 0 ? _("Closed:")
                        : self->dragging && mln_model_closable (self->model, self->drag_id)
-                       ? "Drop here to close" : NULL;
+                       ? _("Drop here to close") : NULL;
 
     /* A group, named by what it says it is. */
     if (what != NULL)
@@ -1313,7 +1314,7 @@ fill_drawer (MlnPanes *self)
     {
       Pane *p = pane_of (self, closed->pdata[i]);
       GtkWidget *b = gtk_button_new_with_label (p->title);
-      char *tip = g_strdup_printf ("Reopen %s", p->title);
+      char *tip = g_strdup_printf (_("Reopen %s"), p->title);
 
       gtk_widget_set_tooltip_text (b, tip);
       gtk_accessible_update_property (GTK_ACCESSIBLE (b),
@@ -1446,7 +1447,8 @@ sync_node (MlnPanes *self, MlnNode *node, GHashTable *drawn, GHashTable *front)
          another. */
       if (active < live->len)
         {
-          char *name = g_strdup_printf ("Panes: %s",
+          /* Translators: a tab strip, named for the pane in front. */
+          char *name = g_strdup_printf (_("Panes: %s"),
                                         pane_of (self, live->pdata[active])->title);
 
           gtk_accessible_update_property (GTK_ACCESSIBLE (s->strip),
@@ -1525,8 +1527,8 @@ sync_one (MlnPanes *self, GHashTable *front)
     {
       GArray *ids = mln_model_floats (self->model);
       const char *why = ids->len > 0
-        ? "Every pane is in a window of its own."
-        : "Every pane is closed. Reopen one from the row above.";
+        ? _("Every pane is in a window of its own.")
+        : _("Every pane is closed. Reopen one from the row above.");
 
       if (g_strcmp0 (gtk_label_get_text (GTK_LABEL (self->blank)), why) != 0)
         gtk_label_set_text (GTK_LABEL (self->blank), why);
@@ -1789,7 +1791,7 @@ on_float_close (GtkWindow *win, gpointer data)
           if (id != NULL)
             focus_front (self, mln_model_leaf_with (self->model, id));
 
-          announce (self, said (self, "%s moved to the main window", id));
+          announce (self, said (self, _("%s moved to the main window"), id));
 
           g_free (id);
           break;
@@ -2397,7 +2399,7 @@ land (gpointer data)
       mln_model_has (self->model, l->id) && (leaf == NULL || mln_model_holds (self->model, leaf)))
     {
       MlnPanes *home = main_of (self);
-      char *text = said (self, l->drop.kind == DROP_DRAWER ? "%s closed" : "%s moved", l->id);
+      char *text = said (self, l->drop.kind == DROP_DRAWER ? _("%s closed") : _("%s moved"), l->id);
 
       switch (l->drop.kind)
         {
@@ -2783,7 +2785,7 @@ reorder (MlnPanes *self, const char *id, gboolean back)
   g_ptr_array_unref (live);
   mln_model_drop_tab (self->model, mine, leaf, before);
   done (self, mln_model_leaf_with (self->model, mine),
-        said (self, back != rtl (self) ? "%s moved left" : "%s moved right", mine));
+        said (self, back != rtl (self) ? _("%s moved left") : _("%s moved right"), mine));
   g_free (before);
   g_free (mine);
 
@@ -2925,8 +2927,8 @@ on_key (GtkEventControllerKey *keys, guint keyval, guint code,
       else
         {
           char *mine = g_strdup (id);
-          char *text = said (self, dx < 0 ? "%s moved left" : dx > 0 ? "%s moved right"
-                                   : dy < 0 ? "%s moved up" : "%s moved down", id);
+          char *text = said (self, dx < 0 ? _("%s moved left") : dx > 0 ? _("%s moved right")
+                                   : dy < 0 ? _("%s moved up") : _("%s moved down"), id);
           MlnNode *zoom;
 
           if (to != NULL)
@@ -2962,8 +2964,8 @@ on_key (GtkEventControllerKey *keys, guint keyval, guint code,
         used = FALSE;
       else
         {
-          char *text = said (self, dir == MLN_ROW ? "%s split off to the right"
-                                                  : "%s split off below", moving);
+          char *text = said (self, dir == MLN_ROW ? _("%s split off to the right")
+                                                  : _("%s split off below"), moving);
 
           mln_model_drop_beside (self->model, moving, leaf, dir, TRUE);
           done (self, leaf, text);
@@ -2979,11 +2981,11 @@ on_key (GtkEventControllerKey *keys, guint keyval, guint code,
       mln_model_set_zoom (self->model, zooming ? leaf : NULL);
       render (self);
       focus_front (self, leaf);
-      announce (self, said (self, zooming ? "%s zoomed" : "%s unzoomed", id));
+      announce (self, said (self, zooming ? _("%s zoomed") : _("%s unzoomed"), id));
     }
   else if (chord_is (keys, keyval, code, GDK_KEY_w) && id != NULL)
     {
-      char *text = said (self, "%s closed", id);
+      char *text = said (self, _("%s closed"), id);
 
       /* Onto a leaf still in the tree: this one if it kept anything. */
       if (mln_model_close (self->model, id))
@@ -3037,7 +3039,7 @@ undock (MlnPanes *self, const char *id)
     {
       gtk_window_present (fw->win);
       gtk_widget_grab_focus (p->tab);
-      announce (fw->panes, said (self, "%s moved to a new window", id));
+      announce (fw->panes, said (self, _("%s moved to a new window"), id));
     }
 }
 
@@ -3060,7 +3062,7 @@ dock (MlnPanes *self, const char *id)
     gtk_window_present (GTK_WINDOW (root));
 
   gtk_widget_grab_focus (p->tab);
-  announce (home, said (home, "%s moved to the main window", id));
+  announce (home, said (home, _("%s moved to the main window"), id));
 }
 
 static void
@@ -3073,7 +3075,7 @@ act_on_pane (GtkWidget *w, const char *name, GVariant *param)
 
   if (strcmp (name, "panes.close") == 0)
     {
-      char *text = said (self, "%s closed", mine);
+      char *text = said (self, _("%s closed"), mine);
 
       if (mln_model_close (self->model, mine))
         done (self, leaf != NULL && mln_model_holds (self->model, leaf)
@@ -3085,7 +3087,7 @@ act_on_pane (GtkWidget *w, const char *name, GVariant *param)
                             strcmp (name, "panes.split-down") == 0))
     {
       gboolean right = strcmp (name, "panes.split-right") == 0;
-      char *text = said (self, right ? "%s split off to the right" : "%s split off below", mine);
+      char *text = said (self, right ? _("%s split off to the right") : _("%s split off below"), mine);
 
       mln_model_drop_beside (self->model, mine, leaf, right ? MLN_ROW : MLN_COL, TRUE);
       done (self, mln_model_leaf_with (self->model, mine), text);
@@ -3097,7 +3099,7 @@ act_on_pane (GtkWidget *w, const char *name, GVariant *param)
       mln_model_set_zoom (self->model, zooming ? leaf : NULL);
       render (self);
       focus_front (self, leaf);
-      announce (self, said (self, zooming ? "%s zoomed" : "%s unzoomed", mine));
+      announce (self, said (self, zooming ? _("%s zoomed") : _("%s unzoomed"), mine));
     }
   else if (strcmp (name, "panes.move-left") == 0 || strcmp (name, "panes.move-right") == 0)
     reorder (self, mine, (strcmp (name, "panes.move-left") == 0) != rtl (self));
@@ -3167,7 +3169,7 @@ open_menu (MlnPanes *self, const char *id, double x, double y)
           {
             char *detailed = g_strconcat (left ? "panes.move-left" : "panes.move-right",
                                           target, NULL);
-            GMenuItem *item = g_menu_item_new (left ? "Move Lef_t" : "Move Ri_ght", detailed);
+            GMenuItem *item = g_menu_item_new (left ? _("Move Lef_t") : _("Move Ri_ght"), detailed);
 
             g_menu_item_set_attribute (item, "accel", "s",
                                        back ? "<Control><Shift>Page_Up"
@@ -3184,26 +3186,26 @@ open_menu (MlnPanes *self, const char *id, double x, double y)
   if (live->len > 1 && s != NULL)
     {
       if (mln_model_splittable (self->model, leaf, id, MLN_ROW, s->box.w))
-        ITEM ("Split _Right", "panes.split-right");
+        ITEM (_("Split _Right"), "panes.split-right");
 
       if (mln_model_splittable (self->model, leaf, id, MLN_COL, s->box.h))
-        ITEM ("Split _Down", "panes.split-down");
+        ITEM (_("Split _Down"), "panes.split-down");
     }
 
   /* A zoom is the main window's; a floating window is as big as it is. */
   if (self->owner == NULL)
-    ITEM (mln_model_get_zoom (self->model) == leaf ? "_Unzoom" : "_Zoom", "panes.zoom");
+    ITEM (mln_model_get_zoom (self->model) == leaf ? _("_Unzoom") : _("_Zoom"), "panes.zoom");
 
   /* Out into a window of its own, unless it is alone in one already; and
      back, from one. */
   if (self->owner == NULL || live->len > 1 || mln_node_n_kids (root_of (self)) > 0)
-    ITEM ("Move to _New Window", "panes.undock");
+    ITEM (_("Move to _New Window"), "panes.undock");
 
   if (self->owner != NULL)
-    ITEM ("Move to _Main Window", "panes.dock");
+    ITEM (_("Move to _Main Window"), "panes.dock");
 
   if (mln_model_closable (self->model, id))
-    ITEM ("_Close", "panes.close");
+    ITEM (_("_Close"), "panes.close");
 
 #undef ITEM
 
@@ -3212,7 +3214,7 @@ open_menu (MlnPanes *self, const char *id, double x, double y)
   if (p->menu != NULL)
     g_menu_append_section (menu, NULL, p->menu);
 
-  g_menu_append (end, "Reset _Layout", "panes.reset");
+  g_menu_append (end, _("Reset _Layout"), "panes.reset");
   g_menu_append_section (menu, NULL, G_MENU_MODEL (end));
 
   /* One open at a time, parented to MlnPanes, which presents it again
@@ -3566,7 +3568,8 @@ allocate_split (MlnPanes *self, MlnNode *split, Box box)
                 if (before + size > 0)
                   {
                     double now = 100.0 * before / (before + size);
-                    char *text = g_strdup_printf ("%.0f%%", now);
+                    /* Translators: a divider's place, in percent. */
+                    char *text = g_strdup_printf (_("%.0f%%"), now);
 
                     gtk_accessible_update_property (GTK_ACCESSIBLE (d->bar),
                                                     GTK_ACCESSIBLE_PROPERTY_VALUE_NOW, now,
@@ -3986,6 +3989,15 @@ mln_panes_class_init (MlnPanesClass *klass)
   GObjectClass *oc = G_OBJECT_CLASS (klass);
   GtkWidgetClass *wc = GTK_WIDGET_CLASS (klass);
 
+  /* The library's own strings, in the library's own domain: once, before
+     any MlnPanes says anything. Unless the app has bound the domain
+     already, as one that ships relocated (a Windows or macOS bundle) has
+     to: a domain nobody bound reads the same as one never heard of. */
+  if (g_strcmp0 (bindtextdomain (GETTEXT_PACKAGE, NULL),
+                 bindtextdomain (GETTEXT_PACKAGE "-unbound", NULL)) == 0)
+    bindtextdomain (GETTEXT_PACKAGE, LOCALEDIR);
+  bind_textdomain_codeset (GETTEXT_PACKAGE, "UTF-8");
+
   oc->dispose = mln_panes_dispose;
   oc->finalize = mln_panes_finalize;
   oc->get_property = mln_panes_get_property;
@@ -4118,7 +4130,7 @@ mln_panes_init (MlnPanes *self)
     gtk_widget_add_controller (GTK_WIDGET (self), motion);
   }
 
-  self->blank = gtk_label_new ("Every pane is closed. Reopen one from the row above.");
+  self->blank = gtk_label_new (_("Every pane is closed. Reopen one from the row above."));
   gtk_widget_add_css_class (self->blank, "dim-label");
   gtk_widget_set_parent (self->blank, GTK_WIDGET (self));
   show_child (self->blank, FALSE);
@@ -4283,7 +4295,7 @@ mln_panes_set_title (MlnPanes *self, const char *id, const char *title)
                                   GTK_ACCESSIBLE_PROPERTY_LABEL, title, -1);
 
   {
-    char *name = g_strdup_printf ("Close %s", title);
+    char *name = g_strdup_printf (_("Close %s"), title);
 
     gtk_accessible_update_property (GTK_ACCESSIBLE (p->shut),
                                     GTK_ACCESSIBLE_PROPERTY_LABEL, name, -1);
@@ -4383,7 +4395,7 @@ mln_panes_set_attention (MlnPanes *self, const char *id, gboolean attention)
   /* A pane in view is being looked at already. */
   if (attention && !p->shown && !gtk_widget_has_css_class (p->tab, "attention"))
     announce (drawer_of (self, mln_model_leaf_with (self->model, id)),
-              said (self, "%s needs attention", id));
+              said (self, _("%s needs attention"), id));
 
   mark (p, attention && !p->shown);
 
