@@ -242,6 +242,16 @@ destroy_console (GSimpleAction *action, GVariant *param, gpointer panes)
     gtk_window_destroy (win);
 }
 
+/* And to close one, as Alt F4 does. */
+static void
+close_console (GSimpleAction *action, GVariant *param, gpointer panes)
+{
+  GtkWindow *win = mln_panes_get_window (panes, "console");
+
+  if (win != NULL)
+    gtk_window_close (win);
+}
+
 /* The tabs from a strip into the corner and back, as an app's View menu
    might: Ctrl T. */
 static void
@@ -398,6 +408,16 @@ activate (GtkApplication *app)
     gtk_application_set_accels_for_action (app, "app.destroy-console",
                                            (const char *[]) { "<Control>d", NULL });
     g_object_unref (d);
+  }
+
+  {
+    GSimpleAction *c = g_simple_action_new ("close-console", NULL);
+
+    g_signal_connect (c, "activate", G_CALLBACK (close_console), panes);
+    g_action_map_add_action (G_ACTION_MAP (app), G_ACTION (c));
+    gtk_application_set_accels_for_action (app, "app.close-console",
+                                           (const char *[]) { "<Control><Shift>d", NULL });
+    g_object_unref (c);
   }
 
   mln_panes_set_default (MLN_PANES (panes), "main", LAYOUT);

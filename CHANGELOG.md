@@ -6,6 +6,19 @@
   in the order the leaves are laid out and round from the last to the
   first, as F6 moves between panes in most desktop apps. Unlike the Alt chords they work from a text field, so a
   keyboard user can leave one without tabbing through it.
+- **Screen readers**: what is out of sight is out of their reach too
+  (panes behind a tab, a zoom's hidden leaves, an empty drawer); a
+  divider is a range with its value in percent, which a screen reader
+  can set; each tab strip is named for the pane in front; a marked tab
+  says it needs attention; the drawer is a group named by its label, and
+  its buttons say what they reopen.
+- **Dividers** take Home and End, as far as they go either way, and
+  Enter, which evens the split as a double click does.
+- **High contrast** (GTK's interface contrast from GTK 4.20, or a high
+  contrast theme) takes the dimming off inactive tabs, the drawer and
+  the dividers. In the corner, a marked tab has a dot as well as a color.
+- **Closing a floating window** puts the focus on what came back into
+  the main window, rather than nowhere.
 
 ## 0.2.1 — 2026-09-28
 

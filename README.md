@@ -58,6 +58,15 @@ while it is in front, where it covers nothing: `mln_panes_set_corner_pinned`.
 mullion's `header: 'corner'` and `setCornerPinned` are the same, for a web
 page.
 
+## Accessibility
+
+Tabs, strips, dividers and the drawer have the roles and names a screen
+reader looks for, and what is out of sight is hidden from it. Dividers
+take the arrow keys, Home, End and Enter (evens the split). Under high
+contrast -- GTK's interface contrast from GTK 4.20, or a high contrast
+theme before that -- MlnPanes has the `contrast` style class and dims
+nothing; an app's stylesheet can use it too.
+
 ## What it adds to mullion's layouts
 
 Fields mullion does not write and reads past, for what a desktop app

@@ -177,9 +177,9 @@ def check(ok, what):
         failures += 1
 
 
-def scenario(fn, env=None):
+def scenario(fn, env=None, seed=None):
     name = fn.__name__
-    with shotbox.Session(size=(1100, 720), wayland=WAYLAND,
+    with shotbox.Session(size=(1100, 720), wayland=WAYLAND, seed=seed,
                          env={"GDK_BACKEND": "wayland" if WAYLAND else "x11",
                               # The leaks GTK leaves at exit are GTK's.
                               "ASAN_OPTIONS": "detect_leaks=0",
@@ -325,6 +325,32 @@ def divider(d):
     d.settle()
     sizes = d.kept()["size"]
     check(abs(sizes[0] - sizes[1]) < 1e-9, f"a double click evens it: {sizes}")
+
+
+def sizes(node):
+    """Every split's shares, in order."""
+    if "kids" not in node:
+        return []
+    return [node["size"]] + [s for k in node["kids"] for s in sizes(k)]
+
+
+def divider_keys(d):
+    d.click(*d.centre("inspector", "leaf"))      # into the inspector's text
+    for _ in range(12):
+        if d.focus() == "MlnDivider":
+            break
+        d.key("ctrl+Tab")
+    check(d.focus() == "MlnDivider", f"(the Tab key reaches a divider: {d.focus()})")
+    d.key("End")
+    far = sizes(d.kept())
+    d.key("Home")
+    near = sizes(d.kept())
+    moved = [i for i in range(len(far)) if far[i] != near[i]]
+    check(len(moved) == 1 and far[moved[0]][0] > near[moved[0]][0],
+          f"End and Home move a divider as far as it goes either way: {far} {near}")
+    d.key("Return")
+    even = sizes(d.kept())[moved[0]] if moved else [0, 1]
+    check(abs(even[0] - even[1]) < 1e-9, f"and Enter evens it: {even}")
 
 
 def tab_menu(d):
@@ -532,6 +558,30 @@ def floats_destroyed(d):
     check("console" in d.shown(), "and the pane in it is in view")
 
 
+def floats_closed(d):
+    x, y = d.centre("console")
+    d.s.click(int(x), int(y), window=W, button=3)
+    time.sleep(0.5)
+    d.key("n")                          # Move to _New Window
+    d.s.wait_window("Console")
+    d.settle()
+    d.s.key("ctrl+shift+d")             # the demo closes it, as Alt F4 does
+    time.sleep(1.0)
+    d.settle()
+    check("window" not in d.geometry()["console"], "a floating window closed docks its pane")
+    check(d.focus() == "tab Console",
+          f"and the focus goes with it, to its tab in the main window: {d.focus()}")
+
+
+def high_contrast(d):
+    for _ in range(20):
+        if d.lines("panes"):
+            break
+        time.sleep(0.2)
+    check(any(l.startswith(".contrast") for l in d.lines("panes")),
+          f"a high contrast theme takes the dimming off: {d.lines('panes')}")
+
+
 def floats_keep_their_size(d):
     d.click(*d.centre("drawing"))       # a change, to keep the layout
     k = d.kept()
@@ -659,7 +709,7 @@ def right_to_left(d):
 os.makedirs(OUT, exist_ok=True)
 
 for fn in (starts, raises, closes_and_reopens, drags_beside, drags_onto_a_strip,
-           drags_into, escape_cancels, chords, tab_keys, divider, tab_menu,
+           drags_into, escape_cancels, chords, tab_keys, divider, divider_keys, tab_menu,
            drops_on_the_drawer, split_chords, f6_cycles, tab_order):
     print(f"# {fn.__name__}")
     scenario(fn)
@@ -677,6 +727,17 @@ scenario(drags_out_and_in)
 
 print("# floats_destroyed")
 scenario(floats_destroyed)
+
+print("# floats_closed")
+scenario(floats_closed)
+
+print("# high_contrast")
+home = os.path.join(OUT, "high_contrast-home")
+os.makedirs(os.path.join(home, ".config", "gtk-4.0"), exist_ok=True)
+with open(os.path.join(home, ".config", "gtk-4.0", "settings.ini"), "w") as f:
+    f.write("[Settings]\ngtk-cursor-blink = false\ngtk-enable-animations = false\n"
+            "gtk-theme-name = HighContrast\n")
+scenario(high_contrast, env={"MLN_DEMO_DUMP": "1"}, seed=home)
 
 print("# floats_keep_their_size")
 scenario(floats_keep_their_size, env={"MLN_DEMO_HEADERBAR": "1", "MLN_DEMO_LAYOUT": json.dumps({
