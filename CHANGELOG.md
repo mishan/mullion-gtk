@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-10-12
 
 - **F6 and Shift F6** step the focus to the next leaf and the one before,
   in the order the leaves are laid out and round from the last to the

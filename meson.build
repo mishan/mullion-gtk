@@ -1,5 +1,5 @@
 project('mullion-gtk', 'c',
-  version: '0.2.1',
+  version: '0.3.0',
   license: 'LGPL-2.1-or-later',
   meson_version: '>= 0.60',
   default_options: ['c_std=gnu11', 'warning_level=2', 'default_library=static'])
