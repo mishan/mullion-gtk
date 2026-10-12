@@ -138,7 +138,7 @@ From a meson project, as a subproject (`subprojects/mullion-gtk.wrap`):
 ```ini
 [wrap-git]
 url = https://github.com/mishan/mullion-gtk.git
-revision = v0.2.1
+revision = v0.3.0
 depth = 1
 ```
 
@@ -153,7 +153,7 @@ From CMake, with FetchContent (or `add_subdirectory` on a copy):
 include(FetchContent)
 FetchContent_Declare(mullion-gtk
   GIT_REPOSITORY https://github.com/mishan/mullion-gtk.git
-  GIT_TAG v0.2.1)
+  GIT_TAG v0.3.0)
 FetchContent_MakeAvailable(mullion-gtk)
 target_link_libraries(app PRIVATE mullion-gtk::mullion-gtk)
 ```
