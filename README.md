@@ -250,6 +250,19 @@ mln_panes_set_placement (panes, "terminal", "side", TRUE);
 [`demo/demo.c`](demo/demo.c) uses the rest: icons, the corner, a pane's
 own tab-menu items, floating windows made by the app.
 
+### Translations
+
+The widget's strings are in the gettext domain `mullion-gtk-0`, looked
+up under the `localedir` it is built for (the app's, as a subproject).
+`meson compile -C build mullion-gtk-0-pot` writes the template,
+`po/mullion-gtk-0.pot`; a translation is `po/<lang>.po`, with its
+language added to `po/LINGUAS`, and is installed with the library — into
+the app's `localedir` when an app builds it in with meson. An app that
+builds it some other way ships the `.mo` files itself, and one that moves
+them at run time (a relocatable bundle) binds `mullion-gtk-0` to where
+they are before it first uses the `MlnPanes` type; the library leaves a
+binding it finds alone.
+
 ## License
 
 LGPL-2.1-or-later. See [COPYING](COPYING).

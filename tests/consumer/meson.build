@@ -1,7 +1,7 @@
 # A meson project that takes mullion-gtk as a subproject: CI builds it
 # with the default library shared, to check that mullion-gtk stays static
-# there and installs nothing into it. subprojects/mullion-gtk is a link to
-# this checkout, made by CI.
+# there and installs nothing into it but its translations.
+# subprojects/mullion-gtk is a link to this checkout, made by CI.
 project('mln-consumer', 'c', default_options: ['default_library=shared'])
 
 mullion = dependency('mullion-gtk-0', fallback: ['mullion-gtk'])
