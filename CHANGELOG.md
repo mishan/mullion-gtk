@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **F6 and Shift F6** step the focus to the next leaf and the one before,
+  in the order the leaves are laid out and round from the last to the
+  first, as F6 moves between panes in most desktop apps. Unlike the Alt chords they work from a text field, so a
+  keyboard user can leave one without tabbing through it.
+
 ## 0.2.1 — 2026-09-28
 
 - **Fixed**: closing the last pane of a floating window by its tab's cross,

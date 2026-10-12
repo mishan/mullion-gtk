@@ -2505,13 +2505,59 @@ done (MlnPanes *self, MlnNode *leaf)
   g_object_unref (self);
 }
 
+/* The leaves this one draws, in the tree's order: the order they are laid
+   out in, left to right and top to bottom. */
+static void
+leaves_in_order (MlnPanes *self, MlnNode *node, GPtrArray *out)
+{
+  if (mln_node_is_leaf (node))
+    {
+      if (strip_for (self, node) != NULL)
+        g_ptr_array_add (out, node);
+      return;
+    }
+
+  for (guint i = 0; i < mln_node_n_kids (node); i++)
+    leaves_in_order (self, mln_node_kid (node, i), out);
+}
+
+/* F6 and Shift F6: the focus to the next leaf, or the one before, round
+   from the last to the first. FALSE when there is nowhere else to go. */
+static gboolean
+cycle (MlnPanes *self, gboolean back)
+{
+  MlnNode *from = current (self);
+  GPtrArray *order;
+  guint n, at = 0;
+
+  if (root_of (self) == NULL ||
+      (self->owner == NULL && mln_model_get_zoom (self->model) != NULL))
+    return FALSE;
+
+  order = g_ptr_array_new ();
+  leaves_in_order (self, root_of (self), order);
+  n = order->len;
+
+  for (guint i = 0; i < n; i++)
+    if (order->pdata[i] == from)
+      at = i;
+
+  if (n >= 2)
+    done (self, order->pdata[(at + (back ? n - 1 : 1)) % n]);
+
+  g_ptr_array_unref (order);
+  return n >= 2;
+}
+
 /*
  * mullion's chords: Alt with an arrow moves the focus to the leaf that
  * way, Alt Shift with one moves the pane in front there (or off the edge
  * into a half of its own); Alt \ and Alt - split the pane in front off
  * to the right and below; Alt Enter fills the layout with one leaf; Alt
  * W closes; Alt 0 goes back to the default. Never while the focus is
- * somewhere text is typed.
+ * somewhere text is typed. F6 and Shift F6 step the focus round the
+ * leaves, as F6 moves between panes in most desktop apps, and from a text
+ * field too, which has no use for F6.
  */
 static gboolean
 on_key (GtkEventControllerKey *keys, guint keyval, guint code,
@@ -2531,6 +2577,11 @@ on_key (GtkEventControllerKey *keys, guint keyval, guint code,
       end_drag (self);
       return TRUE;
     }
+
+  if (keyval == GDK_KEY_F6 &&
+      !(state & (GDK_ALT_MASK | GDK_CONTROL_MASK | GDK_SUPER_MASK | GDK_META_MASK)) &&
+      mln_model_loaded (self->model))
+    return cycle (self, shift);
 
   if (!(state & GDK_ALT_MASK) ||
       (state & (GDK_CONTROL_MASK | GDK_SUPER_MASK | GDK_META_MASK)) ||
