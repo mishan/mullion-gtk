@@ -17,6 +17,13 @@
 - **High contrast** (GTK's interface contrast from GTK 4.20, or a high
   contrast theme) takes the dimming off inactive tabs, the drawer and
   the dividers. In the corner, a marked tab has a dot as well as a color.
+- **Announcements** (GTK 4.14 and later): a screen reader is told of a
+  move the focus does not tell of -- a pane moved, split off, zoomed or
+  unzoomed, closed, reopened, moved to a window of its own or back to the
+  main one -- and of an attention mark on a pane out of sight.
+- **Ctrl Shift Page Up and Page Down** move the pane in front along its
+  strip, as they move a tab in a browser, and a tab's menu has Move Left
+  and Move Right, with the chords shown.
 - **Closing a floating window** puts the focus on what came back into
   the main window, rather than nowhere.
 

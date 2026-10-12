@@ -368,6 +368,23 @@ def tab_menu(d):
     check(d.lines("clear-console") != [], "an item of the app's own on a tab's menu runs")
 
 
+def reorders(d):
+    d.click(*d.centre("drawing"))       # Drawing in front, after the editor
+    d.key("ctrl+shift+Page_Up")
+    check(tabs(d.kept())[0] == (["drawing", "editor"], 0),
+          f"Ctrl Shift Page Up moves the pane in front back along its strip: {tabs(d.kept())}")
+    check(d.focus() == "tab Drawing", f"with the focus on its tab: {d.focus()}")
+    d.key("ctrl+shift+Page_Down")
+    check(tabs(d.kept())[0] == (["editor", "drawing"], 1),
+          f"and Page Down on again: {tabs(d.kept())}")
+    x, y = d.centre("editor")
+    d.s.click(int(x), int(y), window=W, button=3)
+    time.sleep(0.5)
+    d.key("g")                          # Move Ri_ght
+    check(tabs(d.kept())[0] == (["drawing", "editor"], 1),
+          f"and its tab menu moves it along too: {tabs(d.kept())}")
+
+
 def drops_on_the_drawer(d):
     tx, ty = d.centre("console")
 
@@ -710,7 +727,7 @@ os.makedirs(OUT, exist_ok=True)
 
 for fn in (starts, raises, closes_and_reopens, drags_beside, drags_onto_a_strip,
            drags_into, escape_cancels, chords, tab_keys, divider, divider_keys, tab_menu,
-           drops_on_the_drawer, split_chords, f6_cycles, tab_order):
+           reorders, drops_on_the_drawer, split_chords, f6_cycles, tab_order):
     print(f"# {fn.__name__}")
     scenario(fn)
 
