@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.2 — 2026-10-19
 
 - **Fixed**: in the corner, each leaf's menu button was "Pane menu", so a
   screen reader listed several alike; each is named, and its tooltip
