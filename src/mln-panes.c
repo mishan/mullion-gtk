@@ -1447,11 +1447,18 @@ sync_node (MlnPanes *self, MlnNode *node, GHashTable *drawn, GHashTable *front)
          another. */
       if (active < live->len)
         {
+          const char *title = pane_of (self, live->pdata[active])->title;
           /* Translators: a tab strip, named for the pane in front. */
-          char *name = g_strdup_printf (_("Panes: %s"),
-                                        pane_of (self, live->pdata[active])->title);
+          char *name = g_strdup_printf (_("Panes: %s"), title);
 
           gtk_accessible_update_property (GTK_ACCESSIBLE (s->strip),
+                                          GTK_ACCESSIBLE_PROPERTY_LABEL, name, -1);
+          g_free (name);
+
+          /* Translators: the corner's menu button, for the pane in front. */
+          name = g_strdup_printf (_("Pane menu for %s"), title);
+          gtk_widget_set_tooltip_text (s->more, name);
+          gtk_accessible_update_property (GTK_ACCESSIBLE (s->more),
                                           GTK_ACCESSIBLE_PROPERTY_LABEL, name, -1);
           g_free (name);
         }
@@ -3567,7 +3574,9 @@ allocate_split (MlnPanes *self, MlnNode *split, Box box)
                    side's share of the two, in percent. */
                 if (before + size > 0)
                   {
-                    double now = 100.0 * before / (before + size);
+                    /* Whole, as the text says it: a screen reader can say
+                       both, and 38.6 says "39%, 38 percent". */
+                    double now = round (100.0 * before / (before + size));
                     /* Translators: a divider's place, in percent. */
                     char *text = g_strdup_printf (_("%.0f%%"), now);
 

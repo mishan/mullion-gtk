@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed**: in the corner, each leaf's menu button was "Pane menu", so a
+  screen reader listed several alike; each is named, and its tooltip
+  says, which pane it is for ("Pane menu for Editor").
+- **Fixed**: a divider's value was its exact share while its text was
+  rounded, so a screen reader that says both said "39%, 38 percent";
+  both are whole now.
+
 ## 0.3.1 — 2026-10-12
 
 - **Fixed**: building on macOS, where libintl is not in libc: 0.3.0
